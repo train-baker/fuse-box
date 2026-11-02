@@ -1442,9 +1442,11 @@ class Overlay(QWidget):
     close_main = Signal()
     quit_all = Signal()
     moved = Signal(int, int)
-    ROW_H, PAD, W = 28, 6, 298  # rows: a 24 px field like a layer-shortcut pill + 4 px gap
-    TAB = 32                    # visible width of the icon tab on the left
+    ROW_H, PAD = 28, 6          # rows: a 24 px field like a layer-shortcut pill + 4 px gap
+    ICON, GAP = 9, 10           # tab icons: 9 px, with 10 px of space all round them
+    TAB = ICON + 2 * GAP        # visible width of the icon tab on the left
     TUCK = 10                   # how far the tab runs on, hidden behind the panel
+    W = TAB + 266               # tab + scene panel
     LEFT = TAB + PAD            # rows start here (panel edge + padding)
     OUTER_R = 5                 # panel and tab share one corner radius; scene fields (3 px) nest inside it
     TIPS = {"main": "Show / hide the DaKillswitch window", "quit": "Quit DaKillswitch"}
@@ -1467,26 +1469,20 @@ class Overlay(QWidget):
         self.setFixedSize(self.W, self.PAD * 2 + self.ROW_H * len(toggles))
         self.update()
 
-    def _icon_rows(self) -> tuple[int, int]:  # the two icons line up with the last two scene rows
-        n = len(self.toggles)
-        return max(0, n - 2), max(0, n - 1)
-
-    def _row_cy(self, i: int) -> float:
-        return self.PAD + i * self.ROW_H + self.ROW_H / 2
-
     def _icon_centers(self) -> dict[str, QPointF]:
-        a, b = self._icon_rows()
-        return {"main": QPointF(self.TAB / 2, self._row_cy(a)), "quit": QPointF(self.TAB / 2, self._row_cy(b))}
+        """Window icon above the X; the gap between them equals the gap from each icon to the tab's edges."""
+        x = self.TAB / 2
+        quit_y = self.height() - self.GAP - self.ICON / 2
+        return {"main": QPointF(x, quit_y - self.ICON - self.GAP), "quit": QPointF(x, quit_y)}
 
     def _panel_rect(self) -> QRectF:
         return QRectF(self.rect()).adjusted(self.TAB + 0.5, 0.5, -0.5, -0.5)
 
     def _tab_rect(self) -> QRectF:
-        """Its own piece, coming out from behind the panel's left edge: from the top of the
-        second-to-last scene field to the bottom of the last, with the panel's padding around them."""
-        a, _ = self._icon_rows()
-        top = self.PAD + a * self.ROW_H  # same gap above the field as the panel has above its first one
-        return QRectF(0.5, top + 0.5, self.TAB + self.TUCK, self.height() - top - 1)
+        """Its own piece, coming out from behind the panel's left edge, bottom-aligned with it,
+        just big enough for the two icons and the even gaps around them."""
+        h = 2 * self.ICON + 3 * self.GAP
+        return QRectF(0.5, self.height() - h + 0.5, self.TAB + self.TUCK, h - 1)
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -1543,14 +1539,16 @@ class Overlay(QWidget):
         pen.setJoinStyle(Qt.RoundJoin)
         p.setPen(pen)
         m = c["main"]
-        p.drawRoundedRect(QRectF(m.x() - 2.5, m.y() - 2.5, 8, 8), 1.5, 1.5)  # front window
-        p.drawPolyline([QPointF(m.x() - 5.5, m.y() + 2.5), QPointF(m.x() - 5.5, m.y() - 5.5),
-                        QPointF(m.x() + 2.5, m.y() - 5.5)])  # back window, peeking out top-left
-        # X: quit DaKillswitch
-        p.setOpacity(1.0 if self._hover_btn == "quit" else 0.8)
+        h, o = self.ICON / 2, self.ICON * 0.3  # both icons fill the same ICON-sized square; o: window offset
+        p.drawRoundedRect(QRectF(m.x() - h + o, m.y() - h + o, self.ICON - o, self.ICON - o), 1.5, 1.5)  # front window
+        p.drawPolyline([QPointF(m.x() - h, m.y() + h - o), QPointF(m.x() - h, m.y() - h),
+                        QPointF(m.x() + h - o, m.y() - h)])  # back window, peeking out top-left
+        # X: quit DaKillswitch (half strength until hovered, like a label chip's ✕)
+        p.setOpacity(1.0 if self._hover_btn == "quit" else 0.5)
         pen.setColor(ICON_GREY)
+        pen.setWidthF(1.2)
         p.setPen(pen)
-        q, d = c["quit"], 4
+        q, d = c["quit"], self.ICON / 2 - 0.5
         p.drawLine(QPointF(q.x() - d, q.y() - d), QPointF(q.x() + d, q.y() + d))
         p.drawLine(QPointF(q.x() + d, q.y() - d), QPointF(q.x() - d, q.y() + d))
         p.setOpacity(1.0)
@@ -1558,7 +1556,7 @@ class Overlay(QWidget):
     def _zone(self, pos):
         if pos.x() >= self.TAB:
             return None
-        return next((k for k, c in self._icon_centers().items() if abs(pos.y() - c.y()) <= self.ROW_H / 2), None)
+        return next((k for k, c in self._icon_centers().items() if abs(pos.y() - c.y()) <= (self.ICON + self.GAP) / 2), None)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
