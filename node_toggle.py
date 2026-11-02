@@ -35,13 +35,15 @@ right-click a toggle's state button and use Force ON / Force OFF to resync.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import os
 import re
-import sys
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -490,8 +492,7 @@ def _resolve_pref_dirs() -> list[Path]:
 
 
 def _humanize_action(name: str) -> str:
-    base = re.split(r"[.]", name)[-1]
-    base = base.split("{")[0]
+    base = name.rpartition(".")[2].partition("{")[0]
     base = re.sub(r"^(Context|fuHotkey)_", "", base).replace("_", " ")
     base = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", base)
     return base.strip().capitalize() or name
@@ -607,8 +608,6 @@ class ResolveShortcuts:
         return [_humanize_action(a) for a in self.by_combo.get(self.hotkey_combo(hk), [])]
 
 
-# ----------------------------------------------------------------------------- hotkeys
-
 # ----------------------------------------------------------------------------- layer names
 
 _LAYER_PS = r"""
@@ -682,7 +681,7 @@ def watch_resolve_layer_settings(emit) -> None:
     try:
         proc = subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                text=True, creationflags=0x08000000)  # CREATE_NO_WINDOW
+                                text=True, creationflags=subprocess.CREATE_NO_WINDOW)
     except Exception:
         return
     block = []
@@ -706,7 +705,7 @@ def read_resolve_layer_settings() -> dict | None:
         return None
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _LAYER_PS],
-                           capture_output=True, text=True, timeout=30, creationflags=0x08000000)  # CREATE_NO_WINDOW
+                           capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
     except Exception:
         return None
     lines = r.stdout.splitlines()
@@ -719,11 +718,10 @@ AUTOSTART_NAME = "DaKillswitch"
 
 
 def _launch_cmd(*extra) -> list[str]:
-    exe = sys.executable
-    if IS_WIN and exe.lower().endswith("python.exe"):
-        w = exe[:-10] + "pythonw.exe"
-        exe = w if os.path.exists(w) else exe
-    return [exe, str(Path(__file__).resolve()), *extra]
+    exe = Path(sys.executable)
+    if IS_WIN and exe.name.lower() == "python.exe" and exe.with_name("pythonw.exe").exists():
+        exe = exe.with_name("pythonw.exe")
+    return [str(exe), str(Path(__file__).resolve()), *extra]
 
 
 def _autostart_file() -> Path | None:
@@ -750,17 +748,14 @@ def set_autostart(on: bool):
     """Start DaKillswitch in standby at login (Windows Run key, macOS LaunchAgent, Linux autostart)."""
     cmd = _launch_cmd("--standby")
     if IS_WIN:
-        import subprocess as sp
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0,
                             winreg.KEY_SET_VALUE) as k:
             if on:
-                winreg.SetValueEx(k, AUTOSTART_NAME, 0, winreg.REG_SZ, sp.list2cmdline(cmd))
+                winreg.SetValueEx(k, AUTOSTART_NAME, 0, winreg.REG_SZ, subprocess.list2cmdline(cmd))
             else:
-                try:
+                with contextlib.suppress(OSError):
                     winreg.DeleteValue(k, AUTOSTART_NAME)
-                except OSError:
-                    pass
         return
     f = _autostart_file()
     if not on:
@@ -774,7 +769,6 @@ def set_autostart(on: bool):
                      f"<key>Label</key><string>com.dakillswitch.standby</string><key>ProgramArguments</key><array>{args}"
                      "</array><key>RunAtLoad</key><true/></dict></plist>\n")
     else:
-        import shlex
         f.write_text(f"[Desktop Entry]\nType=Application\nName={APP_NAME}\nExec={shlex.join(cmd)}\n"
                      "X-GNOME-Autostart-enabled=true\n")
 
@@ -1227,11 +1221,12 @@ class NodePicker(QPushButton):
         self.sel: list[dict] = []
         self.nodes = None
         self.placeholder = ""
+        self.label_clash: list[str] = []  # Node Labels in this cell whose ON/OFF disagrees with this scene
+        self._full = ""
         self.setObjectName("cell")
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.clicked.connect(self._open_menu)
-        self.label_clash: list[str] = []  # Node Labels in this cell whose ON/OFF disagrees with this scene
 
     def set_label_clash(self, names: list[str]):
         if names != self.label_clash:
@@ -1269,7 +1264,7 @@ class NodePicker(QPushButton):
         tip = self._full if self.sel else "Click to pick nodes"
         if self._missing():
             tip += "\n(not all of these are on this clip)"
-        if getattr(self, "label_clash", None):
+        if self.label_clash:
             tip += "\n\nRed dot: Node Label " + ", ".join(f"“{n}”" for n in self.label_clash) + \
                    " is set the opposite way to this scene"
         self.setToolTip(tip)
@@ -1277,7 +1272,7 @@ class NodePicker(QPushButton):
 
     def _elide(self):
         w = max(20, self.width() - 22)
-        self.setText(QFontMetrics(self.font()).elidedText(getattr(self, "_full", ""), Qt.ElideRight, w))
+        self.setText(QFontMetrics(self.font()).elidedText(self._full, Qt.ElideRight, w))
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -1342,7 +1337,11 @@ class NodePicker(QPushButton):
         a_all.toggled.connect(on_all)
         for a in node_actions:
             a.toggled.connect(lambda c, a=a: on_node(c, a))
-        clear.triggered.connect(lambda: (setattr(self, "sel", []), self._emit()))
+        def on_clear():
+            self.sel = []
+            self._emit()
+
+        clear.triggered.connect(on_clear)
         sync_enabled()
         m.setMinimumWidth(self.width())
         m.exec(self.mapToGlobal(self.rect().bottomLeft()))
@@ -1360,7 +1359,7 @@ class Overlay(QWidget):
     close_main = Signal()
     quit_all = Signal()
     moved = Signal(int, int)
-    ROW_H, PAD, W, BTN_H = 19, 6, 228, 17  # W: 190 + 20 %
+    ROW_H, PAD, W, BTN_H = 19, 6, 228, 17
     SEP_GAP, BTN_GAP = 3, 6  # extra space above the separator / between separator and buttons
 
     def __init__(self):
@@ -2102,24 +2101,16 @@ def make_icon() -> QIcon:
     return QIcon(pm)
 
 
-LAYER_NAMES: dict[str, str] = {}  # filled from the config by the window
-
-
-def layer_name(n: int) -> str:
-    return LAYER_NAMES.get(str(n)) or f"Layer {n}"
-
-
-def layer_key_title(key: str) -> str:
-    layer = slot_layer(key)
-    return (LAYER_NAMES.get(str(layer)) or f"L{layer}") if layer else slot_title(key)
-
-
 class MainWindow(QMainWindow):
     resolve_windows = Signal(bool)  # from the watcher thread
     layer_settings = Signal(object)  # from the layer-name reader thread
 
     def __init__(self, demo: bool, standby: bool = False, ignore_pid: int | None = None):
         super().__init__()
+        self._sized = False  # first fit done: the window has its starting width
+        self._grid_need = 0
+        self._quitting = False
+        self.server = None  # single-instance QLocalServer, set by main()
         self.demo = demo
         self.standby = standby  # launched by "Start with Resolve": stay hidden until Resolve runs
         self._parked = standby
@@ -2278,8 +2269,6 @@ class MainWindow(QMainWindow):
         self.tags_field = TagsField()
         self.tags_field.add_tag = self._add_tag
         self.tags_field.set_label = self.run_label
-        LAYER_NAMES.clear()
-        LAYER_NAMES.update(self.cfg["layer_names"])
         self.tags_field.changed.connect(self._tags_changed)
 
         # footer: connection · flash · options · presets
@@ -2335,25 +2324,26 @@ class MainWindow(QMainWindow):
         self._flash_timer.timeout.connect(lambda: self.flash(""))
         self.flash("")
 
-    def _layer_order(self) -> tuple[list[int], int | None]:
-        """Clip layers in Resolve's processing order: (layers before Post-Group, post layer or None)."""
+    def _layer_name(self, n: int) -> str:
+        return self.cfg["layer_names"].get(str(n)) or f"Layer {n}"
+
+    def _layer_key_title(self, key: str) -> str:
+        layer = slot_layer(key)
+        return (self.cfg["layer_names"].get(str(layer)) or f"L{layer}") if layer else slot_title(key)
+
+    def _slot_order(self) -> list[str]:
+        """Every graph in Resolve's processing order; the post layer (if any) comes after Post-Group."""
         n = self._layers
         post = n if self.cfg["post_layer"] and n > 1 else None
-        return [k for k in range(1, n + 1) if k != post], post
+        return (["preclip"] + [clip_slot(k) for k in range(1, n + 1) if k != post] + ["postclip"]
+                + ([clip_slot(post)] if post else []) + ["timeline"])
 
     def _rows_for(self, layers: int) -> list[str]:
         """Grid rows in Resolve's processing order: one row per node stack layer in the project
         (Project Settings › Node Stack Layers), plus any deeper layer a scene still points at."""
         saved = [slot_layer(s) or 0 for t in self.cfg["toggles"] for s in t["sel"]]
         self._layers = max([layers, 1] + saved)
-        before, post = self._layer_order()
-        return (["preclip"] + [clip_slot(k) for k in before] + ["postclip"]
-                + ([clip_slot(post)] if post else []) + ["timeline"])
-
-    def _pill_keys(self) -> list[str]:
-        before, post = self._layer_order()
-        return (["preclip"] + [clip_slot(k) for k in before] + ["postclip"]
-                + ([clip_slot(post)] if post else []) + ["timeline"])
+        return self._slot_order()
 
     def _rebuild_grid(self, rows: list[str]):
         self._rows = rows
@@ -2387,7 +2377,7 @@ class MainWindow(QMainWindow):
         for row in rows:
             n = slot_layer(row)
             if n:
-                lab = label(layer_name(n), layer=True)
+                lab = label(self._layer_name(n), layer=True)
                 lab.setToolTip("Layer name from Resolve › Project Settings › General Options › Color.\n"
                                "Updates on Refresh while that settings window is open.")
                 self.grid.addWidget(lab, r, 0)
@@ -2424,11 +2414,12 @@ class MainWindow(QMainWindow):
         self.grid.addWidget(label("Layer shortcut"), r, 0, top_left)
         holder = temp(FlowHolder())
         flow = holder.flow
-        for key in self._pill_keys():
+        for key in self._slot_order():
             lk = self.cfg["layer_keys"].setdefault(key, {"hotkey": None, "on": True, "one_clip": False})
-            tip = (f"Whole {layer_name(slot_layer(key))} on / off" if slot_layer(key) else f"Whole {slot_title(key)} on / off")
+            layer = slot_layer(key)
+            tip = f"Whole {self._layer_name(layer) if layer else slot_title(key)} on / off"
             tip += "\nTurning it back ON leaves OFF node labels and nodes picked in OFF scenes off"
-            pill = LayerPill(key, layer_key_title(key), tip, holder)
+            pill = LayerPill(key, self._layer_key_title(key), tip, holder)
             pill.hk.set_hotkey(lk.get("hotkey"))
             pill.hk.changed.connect(lambda hk, key=key: self._set_layer_hotkey(key, hk))
             pill.flip.connect(self.run_layer)
@@ -2456,7 +2447,10 @@ class MainWindow(QMainWindow):
         self.rkeys.load(force=True)
         self._mark_clashes()
         self._keys_hint()
-        self.try_connect() if not self.bridge.resolve else self.refresh_context(True)
+        if self.bridge.resolve:
+            self.refresh_context(True)
+        else:
+            self.try_connect()
         self._read_layers()
 
     def _read_layers(self):
@@ -2489,8 +2483,6 @@ class MainWindow(QMainWindow):
             return
         self.cfg["layer_names"] = names
         self.cfg["post_layer"] = post
-        LAYER_NAMES.clear()
-        LAYER_NAMES.update(names)
         self.save()
         self._rows = []  # rebuild so rows and layer pills show the new names / order
         self._show_nodes(self._rows_for(self._layers))
@@ -2533,8 +2525,7 @@ class MainWindow(QMainWindow):
     def _fit_height(self):
         lay = self.centralWidget().layout()
         lay.activate()
-        sized = getattr(self, "_sized", False)
-        gw = self.grid_frame.width() if sized else 1000 - 28
+        gw = self.grid_frame.width() if self._sized else 1000 - 28
         gh = self.grid.heightForWidth(gw)
         if gh <= 0:
             gh = self.grid.sizeHint().height()
@@ -2551,16 +2542,16 @@ class MainWindow(QMainWindow):
     def _fit_adjust(self):
         """Correct by whatever the grid actually got vs what it needs (sizeHints of wrapped rows are rough)."""
         self.centralWidget().layout().activate()
-        delta = getattr(self, "_grid_need", 0) - self.grid_frame.height()
+        delta = self._grid_need - self.grid_frame.height()
         if delta:
             self.setFixedHeight(self.height() + delta)
-        if not getattr(self, "_sized", False):
+        if not self._sized:
             self._sized = True
             self.resize(1000, self.height())
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if getattr(self, "_sized", False) and e.oldSize().width() != e.size().width():
+        if self._sized and e.oldSize().width() != e.size().width():
             QTimer.singleShot(0, self._fit_height)
 
     # ---------------------------------------------------------------- helpers
@@ -2715,19 +2706,6 @@ class MainWindow(QMainWindow):
             return i in idx
         return skip
 
-    def _rename_layer(self, n: int, text: str):
-        text = text.strip()
-        if text:
-            self.cfg["layer_names"][str(n)] = text
-        else:
-            self.cfg["layer_names"].pop(str(n), None)
-        LAYER_NAMES.clear()
-        LAYER_NAMES.update(self.cfg["layer_names"])
-        pill = self.pills.get(clip_slot(n))
-        if pill:
-            pill.name.setText(layer_key_title(clip_slot(n)))
-        self.save()
-
     # ---------------------------------------------------------------- edits
     def _next_name(self, i: int, step: int = 1):
         nxt = self.name_edits[(i + step) % NUM_TOGGLES]
@@ -2739,15 +2717,11 @@ class MainWindow(QMainWindow):
         self.refresh_states()
 
     def _key_owner(self, hk, skip) -> tuple | None:
-        for j, t in enumerate(self.cfg["toggles"]):
-            o = t.get("hotkey")
-            if j != skip and o and o.get("mods") == hk["mods"] and o.get("vk") == hk["vk"]:
-                return ("scene", j)
-        for k, v in self.cfg["layer_keys"].items():
-            o = v.get("hotkey")
-            if k != skip and o and o.get("mods") == hk["mods"] and o.get("vk") == hk["vk"]:
-                return ("layer", k)
-        return None
+        owners = [("scene", j, t) for j, t in enumerate(self.cfg["toggles"])]
+        owners += [("layer", k, v) for k, v in self.cfg["layer_keys"].items()]
+        return next(((kind, who) for kind, who, d in owners
+                     if who != skip and (o := d.get("hotkey"))
+                     and o.get("mods") == hk["mods"] and o.get("vk") == hk["vk"]), None)
 
     def _clear_owner(self, owner, hk, new_name):
         kind, who = owner
@@ -2756,7 +2730,7 @@ class MainWindow(QMainWindow):
             self.cfg["toggles"][who]["hotkey"] = None
             self.hotkey_btns[who].set_hotkey(None)
         else:
-            old = layer_key_title(who)
+            old = self._layer_key_title(who)
             self.cfg["layer_keys"][who]["hotkey"] = None
             if who in self.pills:
                 self.pills[who].hk.set_hotkey(None)
@@ -2781,7 +2755,7 @@ class MainWindow(QMainWindow):
         self.refresh_states()
 
     def _set_layer_hotkey(self, key: str, hk):
-        if hk and not self._confirm_key(hk, layer_key_title(key)):
+        if hk and not self._confirm_key(hk, self._layer_key_title(key)):
             pill = self.pills.get(key)
             if pill:
                 pill.hk.set_hotkey(self.cfg["layer_keys"].get(key, {}).get("hotkey"))
@@ -2790,7 +2764,7 @@ class MainWindow(QMainWindow):
         if hk:
             owner = self._key_owner(hk, key)
             if owner:
-                self._clear_owner(owner, hk, layer_key_title(key))
+                self._clear_owner(owner, hk, self._layer_key_title(key))
         self.cfg["layer_keys"].setdefault(key, {"on": True, "one_clip": False})["hotkey"] = hk
         self._mark_clashes()
         self._bind()
@@ -2829,18 +2803,18 @@ class MainWindow(QMainWindow):
             a = m.addAction("This clip only")
             a.setCheckable(True)
             a.setChecked(lk.get("one_clip", False))
-            a.toggled.connect(lambda on: (lk.__setitem__("one_clip", on), self.save(), self.refresh_states()))
+            a.toggled.connect(lambda on: self._set_layer_one_clip(key, on))
         m.exec(gpos)
+
+    def _set_layer_one_clip(self, key: str, on: bool):
+        self.cfg["layer_keys"][key]["one_clip"] = on
+        self.save()
+        self.refresh_states()
 
     def _set_one_clip(self, i: int, on: bool):
         self.cfg["toggles"][i]["one_clip"] = on
         self.save()
         self.refresh_states()
-
-    def _set_post_layer(self, on: bool):
-        self.cfg["post_layer"] = on
-        self.save()
-        self._show_nodes(self._rows_for(self._layers))
 
     def showEvent(self, e):  # keep the overlay's ✕ in step with the main window however it was opened
         super().showEvent(e)
@@ -2957,20 +2931,17 @@ class MainWindow(QMainWindow):
         thread is stuck in a dead API call. Settings are saved on every change, so nothing is lost."""
         if self.demo:
             return
-        try:
+        with contextlib.suppress(Exception):
             self.hotkeys.stop()
             save_config(self.cfg, self.demo)
-        except Exception:
-            pass
         if self.standby or autostart_enabled():  # come back by itself the next time Resolve starts
-            try:
-                if getattr(self, "server", None):
+            with contextlib.suppress(Exception):
+                if self.server:
                     self.server.close()
-                kw = {"creationflags": 0x00000008 | 0x00000200} if IS_WIN else {"start_new_session": True}
-                subprocess.Popen(_launch_cmd("--standby", "--after", str(self.watch.pid)), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, **kw)
-            except Exception:
-                pass
+                kw = ({"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WIN
+                      else {"start_new_session": True})
+                subprocess.Popen(_launch_cmd("--standby", "--after", str(self.watch.pid)), stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
         os._exit(0)
 
     def _resolve_windows_thread(self, up: bool):
@@ -3083,7 +3054,7 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             layers = 0
         layers = layers or clip_layers or 1
-        parts = [self.bridge.version()] if self.bridge.version() else []
+        parts = [v] if (v := self.bridge.version()) else []
         if not proj:
             parts.append("no project open")
         elif not tl:
@@ -3160,11 +3131,11 @@ class MainWindow(QMainWindow):
             if per_tl and tl:
                 n += per_tl(tl)
         except Exception as e:
-            self._busy = False
             self._set_disconnected(f"Lost connection to Resolve ({e})")
             self.flash("Toggle failed: lost connection to Resolve")
             return None
-        self._busy = False
+        finally:
+            self._busy = False
         return n, where
 
     def _report(self, title, word, res):
@@ -3202,13 +3173,13 @@ class MainWindow(QMainWindow):
         self._refresh_tags()  # Node Labels turn red if they now disagree with this scene
         self._report(t["name"], word, res)
 
-    def run_layer(self, key: str, state: bool | None = None):  # noqa: C901
+    def run_layer(self, key: str, state: bool | None = None):
         if not SLOT_RE.match(key):
             return
         lk = self.cfg["layer_keys"].setdefault(key, {"hotkey": None, "on": True, "one_clip": False})
         new_state = (not lk["on"]) if state is None else state
         word = "ON" if new_state else "OFF"
-        title = layer_key_title(key)
+        title = self._layer_key_title(key)
         protect = self._keep_off(key) if new_state else None  # back ON: keep the "should stay off" nodes off
         ALL = [{"all": True}]
         b = self.bridge
@@ -3257,13 +3228,12 @@ class MainWindow(QMainWindow):
         if res is None:
             return
         n, where = res
-        if n:  # nothing matched: leave the label's state alone
+        if n:
             tag["on"] = new_state
             self.save()
             self._refresh_tags()
-        if n:
             self.flash(f"“{tag['name']}” → {word}  ({n} node{'s' if n != 1 else ''} {where})")
-        else:
+        else:  # nothing matched: leave the label's state alone
             self.flash(f"No nodes labelled “{tag['name']}” found on enabled clips — check the spelling in Resolve")
 
     def _pick_preset(self, slot: str):
@@ -3275,12 +3245,7 @@ class MainWindow(QMainWindow):
         self.btn_load.setToolTip(f"Load preset {slot}" if has else f"Preset {slot} is empty")
 
     def save_preset(self, slot: str):
-        snap = []
-        for t in self.cfg["toggles"]:
-            c = copy.deepcopy(t)
-            c["on"] = None
-            snap.append(c)
-        self.cfg["presets"][slot] = snap
+        self.cfg["presets"][slot] = [{**copy.deepcopy(t), "on": None} for t in self.cfg["toggles"]]
         self.save()
         self._pick_preset(slot)
         self.flash(f"Saved preset {slot}")
@@ -3298,11 +3263,14 @@ class MainWindow(QMainWindow):
         self.save()
         self.refresh_states()
         self._rows = []  # force a rebuild in case the preset uses other layers
-        self.refresh_context(force=True) if self.bridge.resolve else self._show_nodes(self._rows_for(1))
+        if self.bridge.resolve:
+            self.refresh_context(force=True)
+        else:
+            self._show_nodes(self._rows_for(1))
         self.flash(f"Loaded preset {slot} (states reset to ON)")
 
     def closeEvent(self, e):
-        if not getattr(self, "_quitting", False):  # the window's X only closes the main window; the overlay stays
+        if not self._quitting:  # the window's X only closes the main window; the overlay stays
             e.ignore()
             self.close_main()
             return
