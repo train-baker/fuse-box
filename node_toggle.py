@@ -65,10 +65,26 @@ MAX_LAYERS = 16
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
 
-ON_COLOR = QColor("#e0a23c")     # gold = on
-IDLE_COLOR = QColor("#3e3e45")
-CONN_COLOR = QColor("#4cc38a")   # green = connected to Resolve
-ACCENT = "#e0a23c"
+# Palette sampled from Resolve 21's Fairlight mixer
+BG = "#28282e"          # panel
+BG_DARK = "#212126"     # headers, window frame
+BG_GRID = "#24242a"     # strip area
+FIELD = "#1f1f1f"       # input fields
+LINE = "#090909"        # dividers and field borders
+BTN = "#3b3b3f"         # buttons (R / S / M, In)
+BTN_HOVER = "#46464b"
+TEXT = "#b8b8ba"        # names
+TEXT_DIM = "#8e9092"    # row labels
+TEXT_FAINT = "#5a5a60"  # empty / disabled
+TEXT_BRIGHT = "#ffffff"  # panel title
+ACCENT = "#c3931d"      # Resolve orange (bus names, active)
+BLUE = "#156284"        # selection (assigned bus)
+GREEN = "#448f64"       # track colour stripe
+RED = "#e64b3d"         # record
+
+ON_COLOR = QColor(ACCENT)
+IDLE_COLOR = QColor(BTN)
+CONN_COLOR = QColor(GREEN)   # connected to Resolve
 
 # A "slot" is one node graph: "preclip", "clip:1", "clip:2", …, "postclip", "timeline".
 SLOT_RE = re.compile(r"^(preclip|postclip|timeline|clip:\d+)$")
@@ -1020,7 +1036,7 @@ class StateDot(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        c = CONN_COLOR if self.state is True else QColor("#e5534b") if self.state is False else IDLE_COLOR
+        c = CONN_COLOR if self.state is True else QColor(RED) if self.state is False else IDLE_COLOR
         p.setPen(Qt.NoPen)
         if self.state is not None:
             glow = QColor(c)
@@ -1036,7 +1052,7 @@ MOD_COLORS = {"ctrl": QColor("#a46c69"), "alt": QColor("#6b9070"), "shift": QCol
 
 def key_segments(text: str, base: QColor | None = None) -> list[tuple[str, QColor]]:
     """'Ctrl+Alt+Shift+Z' -> coloured pieces: modifiers soft red / green / blue, '+' at 50 %, key at 75 %."""
-    base = QColor(base or QColor("#e8e8ec"))
+    base = QColor(base or QColor(TEXT))
     plus, key = QColor(base), QColor(base)
     plus.setAlphaF(0.5)
     key.setAlphaF(0.75)
@@ -1403,8 +1419,10 @@ class Overlay(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(QColor(255, 255, 255, 28), 1))
-        p.setBrush(QColor(20, 20, 23, 232))
+        p.setPen(QPen(QColor(LINE), 1))
+        bg = QColor(BG)
+        bg.setAlpha(240)
+        p.setBrush(bg)
         p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 7, 7)
         y0 = self.PAD
         name_font = QFont(self.font())
@@ -1425,25 +1443,25 @@ class Overlay(QWidget):
                 p.setBrush(Qt.NoBrush)
                 r = r.adjusted(0.6, 0.6, -0.6, -0.6)
             else:
-                p.setPen(QPen(QColor("#55555c"), 1))
+                p.setPen(QPen(QColor(TEXT_FAINT), 1))
                 p.setBrush(Qt.NoBrush)
                 r = r.adjusted(0.5, 0.5, -0.5, -0.5)
             p.drawEllipse(r)
             p.setFont(name_font)
-            p.setPen(QColor("#e6e6ea") if on else QColor("#a8a8b0") if armed else QColor("#6a6a72"))
+            p.setPen(QColor(TEXT_BRIGHT) if on else QColor(TEXT) if armed else QColor(TEXT_FAINT))
             key = t["hotkey"]["text"] if t.get("hotkey") else ""
             kw = QFontMetrics(key_font).horizontalAdvance(key) + 12 if key else 0
             name = QFontMetrics(name_font).elidedText(t["name"], Qt.ElideRight, self.W - 40 - kw - 12)
             p.drawText(QRectF(30, y, self.W - 40 - kw, self.ROW_H), Qt.AlignLeft | Qt.AlignVCenter, name)
             if key:
                 kr = QRectF(self.W - 10 - kw, y + 2, kw, self.ROW_H - 4)
-                p.setPen(QPen(QColor("#38383f"), 1))
-                p.setBrush(QColor("#232328"))
+                p.setPen(QPen(QColor(LINE), 1))
+                p.setBrush(QColor(FIELD))
                 p.drawRoundedRect(kr, 4, 4)
                 p.setFont(key_font)
-                draw_segments(p, kr, key_segments(key, QColor("#c8c8d0")), Qt.AlignHCenter)
+                draw_segments(p, kr, key_segments(key, QColor(TEXT)), Qt.AlignHCenter)
         top = self._btn_top()
-        p.setPen(QPen(QColor(255, 255, 255, 16), 1))  # discreet separator
+        p.setPen(QPen(QColor(LINE), 1))  # divider, like Resolve's
         p.drawLine(QPointF(12, top), QPointF(self.W - 12, top))
         cy = top + self.BTN_GAP + self.BTN_H / 2
         p.setOpacity(1.0 if self._hover_btn == "open" else 0.7)  # app icon: open / bring forward the main window
@@ -1578,8 +1596,8 @@ class FlowLayout(QLayout):
         return y + line_h - rect.y() + m.bottom()
 
 
-ICON_GREY = QColor("#b0b0b8")
-CLASH_RED = QColor("#a46c69")  # same muted red as "Ctrl" in shortcuts
+ICON_GREY = QColor(TEXT)
+CLASH_RED = QColor(RED)
 
 
 class IconButton(QPushButton):
@@ -1612,7 +1630,7 @@ class IconButton(QPushButton):
         p.setOpacity(1.0 if self.underMouse() else 0.5)
         r = QRectF(self.rect())
         if self.boxed:
-            p.setPen(QPen(QColor("#55555c"), 1))
+            p.setPen(QPen(QColor(TEXT_FAINT), 1))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
         s = 11.0
@@ -1921,7 +1939,7 @@ class PinButton(QPushButton):
         super().paintEvent(e)
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        c = QColor(ACCENT) if self.isChecked() else QColor("#8a8a92")
+        c = QColor(ACCENT) if self.isChecked() else QColor(TEXT_DIM)
         cx, cy = self.width() / 2, self.height() / 2
         p.translate(cx, cy)
         p.rotate(45)
@@ -1957,7 +1975,7 @@ class DotButton(QPushButton):
             p.setPen(Qt.NoPen)
             p.setBrush(ON_COLOR)
         else:
-            p.setPen(QPen(QColor("#55555c"), 1))
+            p.setPen(QPen(QColor(TEXT_FAINT), 1))
             p.setBrush(Qt.NoBrush)
             c = c.adjusted(0.5, 0.5, -0.5, -0.5)
         p.drawEllipse(c)
@@ -2001,90 +2019,93 @@ class LayerPill(QFrame):
 
 # ----------------------------------------------------------------------------- main window
 
+# Resolve's UI face is Open Sans; Noto Sans is the same design and is more often installed with all weights
+FONT = '"Noto Sans", "Open Sans", "Segoe UI", "Helvetica Neue", "DejaVu Sans", Arial'
 MONO = 'Consolas, Menlo, "DejaVu Sans Mono", monospace'
 STYLE = f"""
-* {{ font-family: "Segoe UI", "Inter", "Helvetica Neue", "DejaVu Sans", Arial; font-size: 9pt; color: #d9d9de; }}
-QMainWindow, QWidget#root {{ background: #18181b; }}
-QLabel#title {{ font-size: 10pt; font-weight: 600; letter-spacing: 3px; color: #5a5a62; }}
-QLabel#muted {{ color: #85858e; }}
+* {{ font-family: {FONT}; font-size: 9pt; color: {TEXT}; }}
+QMainWindow, QWidget#root {{ background: {BG}; }}
+QLabel#title {{ font-size: 10.5pt; font-weight: 600; color: {TEXT_BRIGHT}; }}
+QLabel#muted {{ color: {TEXT_DIM}; }}
 QLabel#flash {{ color: {ACCENT}; }}
-QLabel#flash[idle="true"] {{ color: #3a3a40; }}
-QLabel#rowlabel {{ color: #9a9aa3; padding-right: 6px; }}
-QLabel#rowlabel[layer="true"] {{ color: #e4e4e8; }}
-QLineEdit#rowedit {{ background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 0 2px;
-    margin-left: -3px; color: #e4e4e8; }}
-QLineEdit#rowedit:hover {{ border-color: #36363d; }}
-QLineEdit#rowedit:focus {{ border-color: {ACCENT}; background: #141417; }}
+QLabel#flash[idle="true"] {{ color: {TEXT_FAINT}; }}
+QLabel#rowlabel {{ color: {TEXT_DIM}; padding-right: 8px; }}
+QLabel#rowlabel[layer="true"] {{ color: {TEXT}; }}
+QLineEdit#rowedit {{ background: transparent; border: 1px solid transparent; border-radius: 3px; padding: 0 2px;
+    margin-left: -3px; color: {TEXT}; }}
+QLineEdit#rowedit:hover {{ border-color: {BTN}; }}
+QLineEdit#rowedit:focus {{ border-color: {BLUE}; background: {FIELD}; }}
 QLabel#chip {{ font-family: {MONO}; font-size: 8pt; padding: 0 2px; }}
 QLabel#chip[state="on"] {{ color: {ACCENT}; }}
-QLabel#chip[state="off"] {{ color: #6a6a72; }}
-QLabel#chip[state="idle"] {{ color: #45454c; }}
-QLabel#chip[state="armed"] {{ color: #a8803a; }}
-QLabel#one {{ font-size: 7pt; color: #8a8a92; border: 1px solid #3a3a40; border-radius: 3px; padding: 0 3px;
+QLabel#chip[state="off"] {{ color: {TEXT_DIM}; }}
+QLabel#chip[state="idle"] {{ color: {TEXT_FAINT}; }}
+QLabel#chip[state="armed"] {{ color: {ACCENT}; }}
+QLabel#one {{ font-size: 7pt; color: {TEXT_DIM}; border: 1px solid {BTN}; border-radius: 2px; padding: 0 3px;
     min-height: 12px; max-height: 12px; }}
-QFrame#grid {{ background: #1e1e22; border: 1px solid #2b2b31; border-radius: 8px; }}
-QFrame#sep {{ background: #2b2b31; max-height: 1px; min-height: 1px; }}
-QLineEdit#colname {{ background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 8px 2px 8px;
-    font-weight: 600; color: {ACCENT}; font-size: 9.5pt; }}
-QLineEdit#colname:hover {{ border-color: #36363d; }}
-QLineEdit#colname:focus {{ border-color: {ACCENT}; background: #141417; }}
-QPushButton {{ background: #2a2a30; border: 1px solid #36363d; border-radius: 5px; padding: 4px 10px; }}
-QPushButton:hover {{ background: #33333a; border-color: #46464e; }}
-QPushButton:pressed {{ background: #252529; }}
-QPushButton:disabled {{ color: #55555c; background: #202024; border-color: #2a2a2f; }}
-QPushButton:checked {{ background: #3a2f1c; border-color: #6b5228; color: {ACCENT}; }}
+QFrame#grid {{ background: {BG_GRID}; border: 1px solid {LINE}; border-radius: 2px; }}
+QFrame#sep {{ background: {LINE}; max-height: 1px; min-height: 1px; }}
+QLineEdit#colname {{ background: {BG_DARK}; border: 1px solid transparent; border-top: 2px solid {GREEN};
+    border-radius: 0; padding: 3px 8px; color: {TEXT}; font-size: 9pt; }}
+QLineEdit#colname:hover {{ border-left-color: {BTN}; border-right-color: {BTN}; border-bottom-color: {BTN}; }}
+QLineEdit#colname:focus {{ border-left-color: {BLUE}; border-right-color: {BLUE}; border-bottom-color: {BLUE};
+    background: {FIELD}; color: {TEXT_BRIGHT}; }}
+QPushButton {{ background: {BTN}; border: 1px solid {LINE}; border-radius: 3px; padding: 4px 10px; color: {TEXT}; }}
+QPushButton:hover {{ background: {BTN_HOVER}; }}
+QPushButton:pressed {{ background: {FIELD}; }}
+QPushButton:disabled {{ color: {TEXT_FAINT}; background: {BG_DARK}; }}
+QPushButton:checked {{ background: {BLUE}; color: {LINE}; }}
 QPushButton#ib {{ background: transparent; border: none; padding: 0; }}
-QPushButton#cell {{ background: #141417; border: 1px solid #2c2c32; border-radius: 4px; padding: 3px 8px;
-    text-align: left; color: #e4e4e8; min-height: 18px; }}
-QPushButton#cell:hover {{ border-color: #4a4a52; }}
-QPushButton#cell[empty="true"] {{ color: #5c5c64; }}
+QPushButton#cell {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px; padding: 3px 8px;
+    text-align: left; color: {TEXT}; min-height: 18px; }}
+QPushButton#cell:hover {{ border-color: {BTN_HOVER}; }}
+QPushButton#cell[empty="true"] {{ color: {TEXT_FAINT}; }}
 QPushButton#cell[all="true"] {{ color: {ACCENT}; }}
 QPushButton#cell[missing="true"] {{ color: #8a7a5c; font-style: italic; }}
 QPushButton#cell[kind="hotkey"] {{ font-family: {MONO}; }}
-QPushButton#cell[recording="true"] {{ border-color: {ACCENT}; color: {ACCENT}; }}
-QPushButton#cell[clash="true"] {{ border: 1px solid #b5562f; }}
-QPushButton#state {{ font-family: {MONO}; font-size: 8pt; padding: 0 8px; min-height: 16px; max-height: 16px;
-    border: 1px solid transparent; border-radius: 3px; }}
-QPushButton#state[state="on"] {{ background: #2e2210; color: {ACCENT}; }}
-QPushButton#state[state="off"] {{ background: #26262b; color: #8a8a92; }}
-QPushButton#state[state="idle"] {{ background: #1f1f23; color: #45454c; }}
-QPushButton#state[state="armed"] {{ background: #26262b; color: #a8803a; }}
-QPushButton#state[state="armed"]:hover {{ background: #241b0d; }}
-QPushButton#state[state="on"]:hover {{ background: #3a2b14; }}
-QPushButton#state[state="off"]:hover {{ color: #c8c8cc; }}
-QFrame#pill {{ background: #141417; border: 1px solid #2c2c32; border-radius: 4px; }}
-QLabel#pillname {{ color: #6a6a72; }}
-QLabel#pillname[on="true"] {{ color: #c8c8cc; }}
-QPushButton#pillkey {{ background: #202024; border: 1px solid transparent; border-radius: 3px; padding: 0 6px;
-    font-family: {MONO}; font-size: 8pt; color: #e8e8ec; min-height: 14px; }}
-QPushButton#pillkey[empty="true"] {{ color: #5c5c64; }}
-QPushButton#pillkey[recording="true"] {{ border-color: #7a5a20; color: {ACCENT}; }}
-QPushButton#pillkey[clash="true"] {{ border-color: #b5562f; }}
-QFrame#tagfield {{ background: #141417; border: 1px solid #2c2c32; border-radius: 4px; }}
-QFrame#tag {{ background: #1c1c20; border: 1px solid #3a3a42; border-radius: 4px; }}
-QFrame#tag[armed="true"] {{ background: transparent; border: 1px dashed #45454c; }}
-QLabel#tagname {{ color: #c8c8cc; }}
-QLabel#tagname[armed="true"] {{ color: #6a6a72; }}
-QPushButton#tagstate {{ background: #202024; border: 1px solid transparent; border-radius: 3px; padding: 0 6px;
-    font-family: {MONO}; font-size: 8pt; color: #5c5c64; min-height: 14px; }}
-QPushButton#tagstate:hover {{ color: #c8c8cc; }}
-QPushButton#tagstate[clash="true"] {{ background: #2a1918; color: #a46c69; }}
-QPushButton#tagstate[sel="true"] {{ background: #2e2210; color: {ACCENT}; }}
-QLineEdit#tagedit {{ background: transparent; border: none; padding: 0 7px 0 8px; color: #6a6a72; }}
+QPushButton#cell[recording="true"] {{ border-color: {BLUE}; color: {TEXT_BRIGHT}; }}
+QPushButton#cell[clash="true"] {{ border: 1px solid {RED}; }}
+QPushButton#state {{ font-size: 8pt; font-weight: 600; padding: 0 8px; min-height: 16px; max-height: 16px;
+    border: 1px solid {LINE}; border-radius: 2px; }}
+QPushButton#state[state="on"] {{ background: {ACCENT}; color: {LINE}; }}
+QPushButton#state[state="off"] {{ background: {BTN}; color: {TEXT_DIM}; }}
+QPushButton#state[state="idle"] {{ background: {BG_DARK}; color: {TEXT_FAINT}; }}
+QPushButton#state[state="armed"] {{ background: {BTN}; color: {ACCENT}; }}
+QPushButton#state[state="armed"]:hover {{ background: {BTN_HOVER}; }}
+QPushButton#state[state="on"]:hover {{ background: #d4a22a; }}
+QPushButton#state[state="off"]:hover {{ background: {BTN_HOVER}; color: {TEXT}; }}
+QFrame#pill {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px; }}
+QLabel#pillname {{ color: {TEXT_FAINT}; }}
+QLabel#pillname[on="true"] {{ color: {TEXT}; }}
+QPushButton#pillkey {{ background: {BTN}; border: 1px solid transparent; border-radius: 2px; padding: 0 6px;
+    font-family: {MONO}; font-size: 8pt; color: {TEXT}; min-height: 14px; }}
+QPushButton#pillkey[empty="true"] {{ color: {TEXT_DIM}; }}
+QPushButton#pillkey[recording="true"] {{ border-color: {BLUE}; color: {TEXT_BRIGHT}; }}
+QPushButton#pillkey[clash="true"] {{ border-color: {RED}; }}
+QFrame#tagfield {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px; }}
+QFrame#tag {{ background: {BG_DARK}; border: 1px solid {BTN}; border-radius: 3px; }}
+QFrame#tag[armed="true"] {{ background: transparent; border: 1px dashed {BTN_HOVER}; }}
+QLabel#tagname {{ color: {TEXT}; }}
+QLabel#tagname[armed="true"] {{ color: {TEXT_FAINT}; }}
+QPushButton#tagstate {{ background: {BTN}; border: 1px solid transparent; border-radius: 2px; padding: 0 6px;
+    font-size: 8pt; font-weight: 600; color: {TEXT_DIM}; min-height: 14px; }}
+QPushButton#tagstate:hover {{ color: {TEXT}; }}
+QPushButton#tagstate[clash="true"] {{ background: #5e2421; color: {RED}; }}
+QPushButton#tagstate[sel="true"] {{ background: {ACCENT}; color: {LINE}; }}
+QLineEdit#tagedit {{ background: transparent; border: none; padding: 0 7px 0 8px; color: {TEXT}; }}
 QPushButton#pin {{ padding: 0; }}
-QPushButton#seg {{ padding: 3px 0; min-width: 24px; max-width: 24px; font-family: {MONO}; }}
-QCheckBox {{ spacing: 6px; color: #9a9aa3; }}
-QCheckBox::indicator {{ width: 12px; height: 12px; border-radius: 3px; border: 1px solid #4a4a52; background: #1c1c20; }}
-QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
-QCheckBox:disabled {{ color: #55555c; }}
-QMenu {{ background: #222227; border: 1px solid #3a3a42; padding: 4px; }}
-QMenu::item {{ padding: 5px 22px 5px 8px; border-radius: 4px; }}
-QMenu::item:selected {{ background: #33333a; }}
-QMenu::item:disabled {{ color: #5c5c64; }}
-QMenu::indicator {{ width: 12px; height: 12px; border-radius: 3px; border: 1px solid #4a4a52; background: #1c1c20; margin-left: 4px; }}
-QMenu::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
-QMenu::separator {{ height: 1px; background: #34343b; margin: 4px 2px; }}
-QToolTip {{ background: #26262b; color: #e2e2e6; border: 1px solid #3b3b43; padding: 4px 6px; }}
+QPushButton#seg {{ padding: 3px 0; min-width: 24px; max-width: 24px; }}
+QCheckBox {{ spacing: 6px; color: {TEXT_DIM}; }}
+QCheckBox::indicator {{ width: 12px; height: 12px; border-radius: 2px; border: 1px solid {LINE}; background: {BTN}; }}
+QCheckBox::indicator:checked {{ background: {BLUE}; border-color: {LINE}; }}
+QCheckBox:disabled {{ color: {TEXT_FAINT}; }}
+QMenu {{ background: {BG}; border: 1px solid {LINE}; padding: 4px; }}
+QMenu::item {{ padding: 5px 22px 5px 8px; border-radius: 2px; }}
+QMenu::item:selected {{ background: {BTN_HOVER}; }}
+QMenu::item:disabled {{ color: {TEXT_FAINT}; }}
+QMenu::indicator {{ width: 12px; height: 12px; border-radius: 2px; border: 1px solid {LINE}; background: {BTN}; margin-left: 4px; }}
+QMenu::indicator:checked {{ background: {BLUE}; }}
+QMenu::separator {{ height: 1px; background: {LINE}; margin: 4px 2px; }}
+QToolTip {{ background: {BG_DARK}; color: {TEXT}; border: 1px solid {BTN}; padding: 4px 6px; }}
 """
 
 
@@ -2108,7 +2129,7 @@ def make_icon() -> QIcon:
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QColor("#1e1e22"))
+    p.setBrush(QColor(BG_DARK))
     p.setPen(QPen(QColor(ACCENT), 3))
     p.drawRoundedRect(QRectF(6, 14, 52, 36), 10, 10)
     p.setPen(Qt.NoPen)
@@ -2258,7 +2279,7 @@ class MainWindow(QMainWindow):
         for i, t in enumerate(self.cfg["toggles"]):
             ne = SceneNameEdit(t["name"])
             ne.setObjectName("colname")
-            ne.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            ne.setAlignment(Qt.AlignCenter)  # like Resolve's track headers
             ne.setMaxLength(24)
             ne.setToolTip("Scene name — click to rename\nEnter: confirm, next name · Shift+Enter: confirm, previous name · Esc: cancel")
             ne.textEdited.connect(lambda text, i=i: self._rename(i, text))
@@ -2384,9 +2405,10 @@ class MainWindow(QMainWindow):
             lab = temp(QLabel(text, objectName="rowlabel"))
             lab.setProperty("layer", layer)
             lab.setFixedHeight(26)
+            lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # like Resolve's row labels
             return lab
 
-        top_left = Qt.AlignLeft | Qt.AlignTop
+        top_right = Qt.AlignRight | Qt.AlignTop
         r = 0
         for i in range(NUM_TOGGLES):
             self.grid.addWidget(self.name_edits[i], r, i + 1)
@@ -2428,7 +2450,7 @@ class MainWindow(QMainWindow):
             self.grid.addWidget(self.hotkey_btns[i], r, i + 1)
         r += 1
         # Layer shortcut
-        self.grid.addWidget(label("Layer shortcut"), r, 0, top_left)
+        self.grid.addWidget(label("Layer shortcut"), r, 0, top_right)
         holder = temp(FlowHolder())
         flow = holder.flow
         for key in self._slot_order():
@@ -2449,7 +2471,7 @@ class MainWindow(QMainWindow):
         self.grid.addWidget(temp(QFrame(objectName="sep")), r, 0, 1, NUM_TOGGLES + 1)
         r += 1
         # Node labels
-        self.grid.addWidget(label("Node Label"), r, 0, top_left)
+        self.grid.addWidget(label("Node Label"), r, 0, top_right)
         self.grid.addWidget(self.tags_field, r, 1, 1, NUM_TOGGLES)
         self._refresh_tags()
         self._mark_clashes()
@@ -2553,7 +2575,7 @@ class MainWindow(QMainWindow):
         # pin the grid to what its rows need: its "Maximum" size policy otherwise caps it at a sizeHint
         # that doesn't count wrapped rows, and a second row of node labels gets clipped
         self.grid_frame.setFixedHeight(gh + frame)
-        self.setFixedHeight(self.centralWidget().sizeHint().height() - self.grid_frame.sizeHint().height() + gh + frame)
+        self.setFixedHeight(self.centralWidget().sizeHint().height())  # already counts the grid's fixed height
         QTimer.singleShot(0, self._fit_adjust)
 
     def _fit_adjust(self):
@@ -3319,7 +3341,7 @@ def main():
     app.setStyle("Fusion")
     pal = app.palette()  # dark from the very first paint, before the stylesheet kicks in
     for role in (QPalette.Window, QPalette.Base, QPalette.Button):
-        pal.setColor(role, QColor("#18181b"))
+        pal.setColor(role, QColor(BG))
     app.setPalette(pal)
     app.setStyleSheet(STYLE)
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
