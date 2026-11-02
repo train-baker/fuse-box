@@ -90,3 +90,47 @@ def test_watch_survives_failed_open_process(monkeypatch):
 ])
 def test_key_parts(text, parts):
     assert nt.key_parts(text) == parts
+
+
+PRESET = Path(__file__).resolve().parent.parent / "shortcuts" / "rob-dr-ks-win-260821+2053.xml"
+
+
+def _resolve_prefs(tmp_path, mapping, preset=None):
+    prefs = tmp_path / "prefs"
+    prefs.mkdir()
+    custom = f"<CustomKeyboardPreset>{preset}</CustomKeyboardPreset>" if preset else ""
+    (prefs / "config.user.xml").write_text(f"<KeyboardMappings>{mapping}</KeyboardMappings>{custom}")
+    return prefs
+
+
+def test_custom_preset_is_saved_to_shortcuts_folder(tmp_path, monkeypatch):
+    prefs = _resolve_prefs(tmp_path, -1, "rob-dr-ks-win-260821+2053")
+    (prefs / "keyboard.preset.xml").write_bytes(PRESET.read_bytes())
+    monkeypatch.setattr(nt, "_resolve_pref_dirs", lambda: [prefs])
+    monkeypatch.setattr(nt, "SHORTCUTS_DIR", tmp_path / "shortcuts")
+    keys = nt.ResolveShortcuts()
+    keys.load()
+    assert keys.status == "ok" and keys.by_combo
+    assert (tmp_path / "shortcuts" / "rob-dr-ks-win-260821+2053.xml").read_bytes() == PRESET.read_bytes()
+
+
+@pytest.mark.parametrize("mapping", [0, 3])
+def test_builtin_layout_falls_back_to_saved_preset(tmp_path, monkeypatch, mapping):
+    prefs = _resolve_prefs(tmp_path, mapping)
+    saved = tmp_path / "shortcuts"
+    saved.mkdir()
+    (saved / "my preset.xml").write_bytes(PRESET.read_bytes())
+    monkeypatch.setattr(nt, "_resolve_pref_dirs", lambda: [prefs])
+    monkeypatch.setattr(nt, "SHORTCUTS_DIR", saved)
+    keys = nt.ResolveShortcuts()
+    keys.load()
+    assert keys.status == "saved" and keys.source == "my preset" and keys.by_combo
+
+
+def test_builtin_layout_without_saved_preset(tmp_path, monkeypatch):
+    prefs = _resolve_prefs(tmp_path, 0)
+    monkeypatch.setattr(nt, "_resolve_pref_dirs", lambda: [prefs])
+    monkeypatch.setattr(nt, "SHORTCUTS_DIR", tmp_path / "shortcuts")
+    keys = nt.ResolveShortcuts()
+    keys.load()
+    assert keys.status == "builtin" and not keys.by_combo

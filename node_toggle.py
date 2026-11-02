@@ -525,6 +525,9 @@ def _humanize_action(name: str) -> str:
     return base.strip().capitalize() or name
 
 
+SHORTCUTS_DIR = Path(__file__).resolve().parent / "shortcuts"  # saved copies of Resolve's custom presets
+
+
 class ResolveShortcuts:
     """Reads the keyboard preset Resolve is using (only custom presets are stored on disk).
 
@@ -535,7 +538,8 @@ class ResolveShortcuts:
     MOD_BITS = (("shift", 0x02000000), ("ctrl", 0x04000000), ("alt", 0x08000000), ("meta", 0x10000000))
 
     def __init__(self):
-        self.status = "not loaded"   # "ok" / "builtin" / "missing" / "error"
+        self.status = "not loaded"   # "ok" / "saved" (a copy in SHORTCUTS_DIR) / "builtin" / "missing" / "error"
+        self.source = ""             # name of the preset the clashes are checked against
         self.by_combo: dict[tuple, list[str]] = {}
         self._stamp = None
 
@@ -543,38 +547,66 @@ class ResolveShortcuts:
         try:
             d = next((p for p in _resolve_pref_dirs() if (p / "keyboard.preset.xml").exists()
                       or (p / "config.user.xml").exists()), None)
-            if d is None:
-                self.status, self.by_combo = "missing", {}
-                return
-            files = [d / "config.user.xml", d / "keyboard.preset.xml"]
+            files = [d / "config.user.xml", d / "keyboard.preset.xml"] if d else []
             stamp = tuple(f.stat().st_mtime if f.exists() else 0 for f in files)
             if stamp == self._stamp and not force:
                 return
             self._stamp = stamp
-            cfg = files[0].read_text(encoding="utf-8", errors="replace") if files[0].exists() else ""
-            mapping = re.search(r"<KeyboardMappings>(-?\d+)</KeyboardMappings>", cfg)
-            custom = re.search(r"<CustomKeyboardPreset>(.*?)</CustomKeyboardPreset>", cfg)
-            if mapping and mapping.group(1) != "-1":
-                self.status, self.by_combo = "builtin", {}
+            status, xml, want = self._read_resolve(files)
+            if status == "ok" and self._use(xml, want):
+                self.status, self.source = "ok", want or ""
+                self._snapshot(files[1], self.source)
                 return
-            if not files[1].exists():
-                self.status, self.by_combo = "missing", {}
+            saved = self._newest_snapshot()  # Resolve's layout isn't on disk: use the last custom preset seen
+            if saved and self._use(saved.read_text(encoding="utf-8", errors="replace"), saved.stem):
+                self.status, self.source = "saved", saved.stem
                 return
-            presets = self._parse(files[1].read_text(encoding="utf-8", errors="replace"))
-            want = custom.group(1) if custom else None
-            _, table = next(((n, t) for n, t in presets if n == want), presets[0] if presets else (None, None))
-            if table is None:
-                self.status, self.by_combo = "error", {}
-                return
-            self.by_combo = {}
-            for action, seqs in table.items():
-                for seq in seqs:
-                    if len(seq) == 1:  # chords (two-step keys) can't clash with a single press
-                        self.by_combo.setdefault(self._combo(seq[0]), []).append(action)
-            self.status = "ok"
+            self.status, self.source, self.by_combo = status if status != "ok" else "error", "", {}
         except Exception as e:  # never crash over Resolve's file
             print(f"Couldn't read Resolve's shortcuts: {e}", file=sys.stderr)
-            self.status, self.by_combo = "error", {}
+            self.status, self.source, self.by_combo = "error", "", {}
+
+    @staticmethod
+    def _read_resolve(files: list[Path]) -> tuple[str, str, str | None]:
+        """(status, keyboard.preset.xml text, active custom preset name) from Resolve's preferences."""
+        if not files:
+            return "missing", "", None
+        cfg = files[0].read_text(encoding="utf-8", errors="replace") if files[0].exists() else ""
+        mapping = re.search(r"<KeyboardMappings>(-?\d+)</KeyboardMappings>", cfg)
+        custom = re.search(r"<CustomKeyboardPreset>(.*?)</CustomKeyboardPreset>", cfg)
+        if mapping and mapping.group(1) != "-1":
+            return "builtin", "", None
+        if not files[1].exists():
+            return "missing", "", None
+        return "ok", files[1].read_text(encoding="utf-8", errors="replace"), custom.group(1) if custom else None
+
+    def _use(self, xml: str, want: str | None) -> bool:
+        """Index the preset named `want` (else the first) by key combo. False if the file has none."""
+        presets = self._parse(xml)
+        table = next((t for n, t in presets if n == want), presets[0][1] if presets else None)
+        if table is None:
+            return False
+        self.by_combo = {}
+        for action, seqs in table.items():
+            for seq in seqs:
+                if len(seq) == 1:  # chords (two-step keys) can't clash with a single press
+                    self.by_combo.setdefault(self._combo(seq[0]), []).append(action)
+        return True
+
+    @staticmethod
+    def _snapshot(src: Path, name: str):
+        """Keep a copy of Resolve's custom presets in SHORTCUTS_DIR, named after the active one."""
+        safe = re.sub(r'[\\/:*?"<>|]', "_", name or "keyboard.preset")  # characters Windows filenames can't hold
+        dst = SHORTCUTS_DIR / f"{safe}.xml"
+        data = src.read_bytes()
+        with contextlib.suppress(OSError):
+            if not dst.exists() or dst.read_bytes() != data:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(data)
+
+    @staticmethod
+    def _newest_snapshot() -> Path | None:
+        return max(SHORTCUTS_DIR.glob("*.xml"), key=lambda f: f.stat().st_mtime, default=None)
 
     @staticmethod
     def _parse(xml: str) -> list[tuple[str, dict]]:
@@ -630,7 +662,7 @@ class ResolveShortcuts:
         return frozenset(hk.get("mods", [])), key
 
     def clash(self, hk) -> list[str]:
-        if not hk or self.status != "ok":
+        if not hk or self.status not in ("ok", "saved"):
             return []
         return [_humanize_action(a) for a in self.by_combo.get(self.hotkey_combo(hk), [])]
 
@@ -2550,7 +2582,10 @@ class MainWindow(QMainWindow):
 
     def _keys_hint(self):
         st = self.rkeys.status
-        if st == "builtin":
+        if st == "saved":
+            self.flash(f"Resolve's current keyboard layout isn't on disk: checking clashes against your saved "
+                       f"preset “{self.rkeys.source}” (shortcuts folder)", 12000)
+        elif st == "builtin":
             self.flash("Resolve is on a built-in keyboard layout: save it as a custom preset "
                        "(Keyboard Customization › Save As) to get shortcut clash warnings", 12000)
         elif st in ("missing", "error"):
