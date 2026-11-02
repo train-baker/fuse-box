@@ -97,6 +97,7 @@ IS_MAC = sys.platform == "darwin"
 BG = "#28282e"          # panel
 BG_DARK = "#212126"     # headers, window frame
 BG_GRID = "#24242a"     # strip area
+BORDER = "#1a1a1e"      # the main window's outer edge (Windows 11), a step darker than BG_GRID
 FIELD = "#1f1f1f"       # input fields
 LINE = "#090909"        # dividers and field borders
 BTN = "#3b3b3f"         # buttons (R / S / M, In)
@@ -2983,8 +2984,12 @@ class MainWindow(QMainWindow):
         self.winId()
         if IS_WIN:
             import ctypes
+            hwnd, dwm = int(self.winId()), ctypes.windll.dwmapi
             dark = ctypes.c_int(1)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(int(self.winId()), 20, ctypes.byref(dark), 4)  # dark title bar
+            dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), 4)  # DWMWA_USE_IMMERSIVE_DARK_MODE
+            c = QColor(BORDER)
+            edge = ctypes.c_uint(c.red() | c.green() << 8 | c.blue() << 16)  # COLORREF is 0x00BBGGRR
+            dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(edge), 4)  # DWMWA_BORDER_COLOR; Windows 10 ignores it
         self.setWindowOpacity(0.0)
         self.show()
         QTimer.singleShot(160, lambda: self.setWindowOpacity(1.0))
