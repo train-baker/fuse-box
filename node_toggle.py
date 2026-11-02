@@ -22,7 +22,7 @@ DaKillswitch (formerly Node Toggle) — switch DaVinci Resolve color nodes on an
 
 Requirements: DaVinci Resolve Studio 19.1+ with
   Preferences > System > General > "External scripting using" = Local,
-  Python 3.10+ (64-bit), and:  pip install PySide6 pynput
+  Python 3.10+ (64-bit), and:  pip install -r requirements.txt
 
 Run:   python node_toggle.py            (connects to Resolve)
        python node_toggle.py --standby  (wait for Resolve; used by "Start with Resolve")
@@ -39,6 +39,7 @@ import contextlib
 import copy
 import json
 import os
+import plistlib
 import re
 import shlex
 import shutil
@@ -146,9 +147,18 @@ def default_config() -> dict:
 
 def load_config(demo: bool) -> dict:
     cfg = default_config()
+    path = config_path(demo)
     try:
-        data = json.loads(config_path(demo).read_text(encoding="utf-8"))
-    except Exception:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return cfg
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):  # corrupt: keep it aside so the next save doesn't overwrite it
+        with contextlib.suppress(OSError):
+            path.replace(path.with_name(path.stem + ".bad.json"))
         return cfg
     for i, t in enumerate(data.get("toggles", [])[:NUM_TOGGLES]):
         cfg["toggles"][i] = clean_toggle(i, t)
@@ -763,11 +773,8 @@ def set_autostart(on: bool):
         return
     f.parent.mkdir(parents=True, exist_ok=True)
     if IS_MAC:
-        args = "".join(f"<string>{a}</string>" for a in cmd)
-        f.write_text('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-                     '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>'
-                     f"<key>Label</key><string>com.dakillswitch.standby</string><key>ProgramArguments</key><array>{args}"
-                     "</array><key>RunAtLoad</key><true/></dict></plist>\n")
+        f.write_bytes(plistlib.dumps({"Label": "com.dakillswitch.standby", "ProgramArguments": cmd,
+                                      "RunAtLoad": True}))
     else:
         f.write_text(f"[Desktop Entry]\nType=Application\nName={APP_NAME}\nExec={shlex.join(cmd)}\n"
                      "X-GNOME-Autostart-enabled=true\n")
@@ -851,14 +858,24 @@ class ResolveWatch:
                 u32.EnumWindows(cb_t(cb), 0)
                 return found
 
-            while handle and k32.WaitForSingleObject(handle, 150) != 0:  # 0 = process exited
-                if not any(u32.IsWindow(h) and u32.IsWindowVisible(h) for h in hwnds):
-                    hwnds = main_windows()
-                up = bool(hwnds)
-                if up != self.windows_up and (up or had):
-                    self.windows_up = up
-                    self.on_windows(up)
-                had = had or up
+            def alive():
+                if handle:
+                    return k32.WaitForSingleObject(handle, 150) != 0  # 0 = process exited
+                time.sleep(0.5)  # no handle (access denied): look the process up instead
+                return self._find_pid() == self.pid
+
+            try:
+                while alive():
+                    if not any(u32.IsWindow(h) and u32.IsWindowVisible(h) for h in hwnds):
+                        hwnds = main_windows()
+                    up = bool(hwnds)
+                    if up != self.windows_up and (up or had):
+                        self.windows_up = up
+                        self.on_windows(up)
+                    had = had or up
+            finally:
+                if handle:
+                    k32.CloseHandle(handle)
         else:
             while True:
                 try:
@@ -2717,11 +2734,20 @@ class MainWindow(QMainWindow):
         self.refresh_states()
 
     def _key_owner(self, hk, skip) -> tuple | None:
-        owners = [("scene", j, t) for j, t in enumerate(self.cfg["toggles"])]
-        owners += [("layer", k, v) for k, v in self.cfg["layer_keys"].items()]
-        return next(((kind, who) for kind, who, d in owners
-                     if who != skip and (o := d.get("hotkey"))
-                     and o.get("mods") == hk["mods"] and o.get("vk") == hk["vk"]), None)
+        def same(o):  # no virtual-key code (some Linux setups): compare the key text instead
+            if not o or o.get("mods") != hk["mods"]:
+                return False
+            if hk["vk"] is None or o.get("vk") is None:
+                return o.get("text") == hk["text"]
+            return o.get("vk") == hk["vk"]
+
+        for j, t in enumerate(self.cfg["toggles"]):
+            if j != skip and same(t.get("hotkey")):
+                return ("scene", j)
+        for k, v in self.cfg["layer_keys"].items():
+            if k != skip and same(v.get("hotkey")):
+                return ("layer", k)
+        return None
 
     def _clear_owner(self, owner, hk, new_name):
         kind, who = owner
