@@ -76,6 +76,7 @@ BTN_HOVER = "#46464b"
 TEXT = "#b8b8ba"        # names
 TEXT_DIM = "#8e9092"    # row labels
 TEXT_FAINT = "#5a5a60"  # empty / disabled
+PLUS_GREY = "#646468"   # "+" between key names: between TEXT_DIM and BTN
 TEXT_BRIGHT = "#ffffff"  # panel title
 ACCENT = "#c3931d"      # Resolve orange (bus names, active)
 BLUE = "#156284"        # selection (assigned bus)
@@ -1110,9 +1111,12 @@ class HotkeyButton(QPushButton):
         opt.text = ""
         self.style().drawControl(QStyle.CE_PushButton, opt, p, self)
         p.setFont(self.font())
-        pill = self.objectName() == "pillkey"
-        r = QRectF(self.rect()).adjusted(6 if pill else 9, 0, -4, 0)
-        draw_segments(p, r, key_segments(self.hotkey["text"]), Qt.AlignHCenter if pill else Qt.AlignLeft)
+        segs = key_segments(self.hotkey["text"])
+        if self.objectName() == "pillkey":  # layer keys: grey like "None", each "+" a step darker
+            segs = [(t, QColor(PLUS_GREY) if i % 2 else QColor(TEXT_DIM)) for i, (t, _) in enumerate(segs)]
+            draw_segments(p, QRectF(self.rect()).adjusted(6, 0, -6, 0), segs, Qt.AlignHCenter)
+        else:
+            draw_segments(p, QRectF(self.rect()).adjusted(9, 0, -4, 0), segs)
 
     def set_clash(self, actions: list[str]):
         self.setProperty("clash", bool(actions))
@@ -2021,6 +2025,7 @@ class LayerPill(QFrame):
 
 # Resolve's UI face is Open Sans; Noto Sans is the same design and is more often installed with all weights
 FONT = '"Noto Sans", "Open Sans", "Segoe UI", "Helvetica Neue", "DejaVu Sans", Arial'
+CHIP_FONT = f'"Inter", {FONT}'  # ON / OFF / ARMED: Inter SemiBold sits between Noto's Regular and Bold
 MONO = 'Consolas, Menlo, "DejaVu Sans Mono", monospace'
 STYLE = f"""
 * {{ font-family: {FONT}; font-size: 9pt; color: {TEXT}; }}
@@ -2064,7 +2069,7 @@ QPushButton#cell[missing="true"] {{ color: #8a7a5c; font-style: italic; }}
 QPushButton#cell[kind="hotkey"] {{ font-family: {MONO}; }}
 QPushButton#cell[recording="true"] {{ border-color: {BLUE}; color: {TEXT_BRIGHT}; }}
 QPushButton#cell[clash="true"] {{ border: 1px solid {RED}; }}
-QPushButton#state {{ font-size: 8pt; font-weight: 600; padding: 0 8px; min-height: 16px; max-height: 16px;
+QPushButton#state {{ font-family: {CHIP_FONT}; font-size: 8pt; font-weight: 600; padding: 0 8px; min-height: 16px; max-height: 16px;
     border: 1px solid {LINE}; border-radius: 2px; }}
 QPushButton#state[state="on"] {{ background: {ACCENT}; color: {LINE}; }}
 QPushButton#state[state="off"] {{ background: {BTN}; color: {TEXT_DIM}; }}
@@ -2077,8 +2082,7 @@ QFrame#pill {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px
 QLabel#pillname {{ color: {TEXT_FAINT}; }}
 QLabel#pillname[on="true"] {{ color: {TEXT}; }}
 QPushButton#pillkey {{ background: {BTN}; border: 1px solid transparent; border-radius: 2px; padding: 0 6px;
-    font-family: {MONO}; font-size: 8pt; color: {TEXT}; min-height: 14px; }}
-QPushButton#pillkey[empty="true"] {{ color: {TEXT_DIM}; }}
+    font-family: {MONO}; font-size: 8pt; color: {TEXT_DIM}; min-height: 14px; }}
 QPushButton#pillkey[recording="true"] {{ border-color: {BLUE}; color: {TEXT_BRIGHT}; }}
 QPushButton#pillkey[clash="true"] {{ border-color: {RED}; }}
 QFrame#tagfield {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px; }}
@@ -2087,7 +2091,7 @@ QFrame#tag[armed="true"] {{ background: transparent; border: 1px dashed {BTN_HOV
 QLabel#tagname {{ color: {TEXT}; }}
 QLabel#tagname[armed="true"] {{ color: {TEXT_FAINT}; }}
 QPushButton#tagstate {{ background: {BTN}; border: 1px solid transparent; border-radius: 2px; padding: 0 6px;
-    font-size: 8pt; font-weight: 600; color: {TEXT_DIM}; min-height: 14px; }}
+    font-family: {CHIP_FONT}; font-size: 8pt; font-weight: 600; color: {TEXT_DIM}; min-height: 14px; }}
 QPushButton#tagstate:hover {{ color: {TEXT}; }}
 QPushButton#tagstate[clash="true"] {{ background: #5e2421; color: {RED}; }}
 QPushButton#tagstate[sel="true"] {{ background: {ACCENT}; color: {LINE}; }}
@@ -2279,7 +2283,7 @@ class MainWindow(QMainWindow):
         for i, t in enumerate(self.cfg["toggles"]):
             ne = SceneNameEdit(t["name"])
             ne.setObjectName("colname")
-            ne.setAlignment(Qt.AlignCenter)  # like Resolve's track headers
+            ne.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)  # in line with the node names below
             ne.setMaxLength(24)
             ne.setToolTip("Scene name — click to rename\nEnter: confirm, next name · Shift+Enter: confirm, previous name · Esc: cancel")
             ne.textEdited.connect(lambda text, i=i: self._rename(i, text))
