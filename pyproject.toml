@@ -1,0 +1,16 @@
+[project]
+name = "dakillswitch"
+version = "0.1.4"
+description = "Switch DaVinci Resolve color nodes on and off with global hotkeys"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E9", "F", "B"]

@@ -49,14 +49,40 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QAction, QColor, QPalette, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QPixmap,
+    QAction,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QPen,
+    QPixmap,
 )
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow, QMenu,
-    QMessageBox, QProxyStyle, QPushButton, QSizePolicy, QStyle, QStyleOptionButton, QVBoxLayout, QWidget,
+    QApplication,
+    QCheckBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLayout,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QProxyStyle,
+    QPushButton,
+    QSizePolicy,
+    QStyle,
+    QStyleOptionButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 APP_NAME = "DaKillswitch"
@@ -480,7 +506,7 @@ class ResolveBridge:
         (which records every node's enabled flag) and the still deleted again. None = couldn't read."""
         if self.demo:
             item = tl.GetCurrentVideoItem() if tl else None
-            graphs = ([lg for lg in self.layer_graphs(item, proj)] if item else []) + ([tl.GetNodeGraph()] if tl else [])
+            graphs = (list(self.layer_graphs(item, proj)) if item else []) + ([tl.GetNodeGraph()] if tl else [])
             return [(n["label"], n["enabled"]) for g in graphs for n in getattr(g, "nodes", [])]
         try:
             album = proj.GetGallery().GetCurrentStillAlbum()
@@ -555,15 +581,17 @@ class ResolveShortcuts:
                 return
             self._stamp = stamp
             status, xml, want = self._read_resolve(files)
-            if status == "ok" and self._use(xml, want):
-                self.status, self.source = "ok", want or ""
-                self._snapshot(files[1], self.source)
-                return
+            if status == "ok":
+                if self._use(xml, want):
+                    self.status, self.source = "ok", want or ""
+                    self._snapshot(files[1], self.source)
+                    return
+                status = "error"  # Resolve's file holds no presets
             saved = self._newest_snapshot()  # Resolve's layout isn't on disk: use the last custom preset seen
             if saved and self._use(saved.read_text(encoding="utf-8", errors="replace"), saved.stem):
                 self.status, self.source = "saved", saved.stem
                 return
-            self.status, self.source, self.by_combo = status if status != "ok" else "error", "", {}
+            self.status, self.source, self.by_combo = status, "", {}
         except Exception as e:  # never crash over Resolve's file
             print(f"Couldn't read Resolve's shortcuts: {e}", file=sys.stderr)
             self.status, self.source, self.by_combo = "error", "", {}
@@ -660,7 +688,7 @@ class ResolveShortcuts:
 
     @staticmethod
     def hotkey_combo(hk: dict) -> tuple:
-        key = hk["text"].split("+")[-1].lower() if hk.get("text") else ""
+        key = key_parts(hk["text"])[-1].lower() if hk.get("text") else ""
         return frozenset(hk.get("mods", [])), key
 
     def clash(self, hk) -> list[str]:
@@ -1012,16 +1040,13 @@ class HotkeyEngine(QObject):
             vk = getattr(key.value, "vk", None)
         return vk
 
+    WIN_MOD_VKS = (("ctrl", (0x11,)), ("shift", (0x10,)), ("alt", (0x12,)), ("meta", (0x5B, 0x5C)))  # left/right Win
+
     def _current_mods(self) -> set[str]:
         if IS_WIN:  # ask Windows directly, so a missed key-up can't leave a modifier stuck
             import ctypes
             gks = ctypes.windll.user32.GetAsyncKeyState
-            m = set()
-            if gks(0x11) & 0x8000: m.add("ctrl")
-            if gks(0x10) & 0x8000: m.add("shift")
-            if gks(0x12) & 0x8000: m.add("alt")
-            if (gks(0x5B) | gks(0x5C)) & 0x8000: m.add("meta")
-            return m
+            return {name for name, vks in self.WIN_MOD_VKS if any(gks(vk) & 0x8000 for vk in vks)}
         return set(self._mods)
 
     def _on_press(self, key):
@@ -1090,30 +1115,44 @@ def key_parts(text: str) -> list[str]:
     return text.split("+")
 
 
-def key_blocks(fm: QFontMetrics, text: str, pad: float = 8) -> list[tuple[str, float, bool]]:
-    """'Ctrl+Alt+S' -> [(text, width, boxed)]: one box per modifier, a single '+' before the key's box."""
+class Block(NamedTuple):
+    text: str
+    width: float
+    boxed: bool  # a key box; False for the gap and the '+' between them
+
+
+def key_blocks(fm: QFontMetrics, text: str, pad: float = 8) -> list[Block]:
+    """'Ctrl+Alt+S' -> [Ctrl] [Alt] + [S]: one box per modifier, a single '+' before the key's box."""
+    def box(t: str) -> Block:
+        return Block(t, fm.horizontalAdvance(t) + pad, True)
+
     *mods, key = key_parts(text)
-    out = []
+    out: list[Block] = []
     for m in mods:
-        out.append((m, fm.horizontalAdvance(m) + pad, True))
-        out.append(("", 3, False))  # gap between modifier boxes
+        if out:
+            out.append(Block("", 3, False))  # gap between modifier boxes
+        out.append(box(m))
     if mods:
-        out[-1] = ("+", fm.horizontalAdvance("+") + 6, False)
-    out.append((key, fm.horizontalAdvance(key) + pad, True))
+        out.append(Block("+", fm.horizontalAdvance("+") + 6, False))
+    out.append(box(key))
     return out
 
 
-def draw_key_blocks(p: QPainter, x: float, y: float, h: float, blocks) -> None:
+def blocks_width(blocks: list[Block]) -> float:
+    return sum(b.width for b in blocks)
+
+
+def draw_key_blocks(p: QPainter, x: float, y: float, h: float, blocks: list[Block]) -> None:
     """[Ctrl] [Alt] [Shift] + [S]: grey boxes like "None", the '+' a step darker."""
-    for text, w, boxed in blocks:
-        r = QRectF(x, y, w, h)
-        if boxed:
+    for b in blocks:
+        r = QRectF(x, y, b.width, h)
+        if b.boxed:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(BTN))
             p.drawRoundedRect(r, 2, 2)
-        p.setPen(QColor(TEXT_DIM if boxed else PLUS_GREY))
-        p.drawText(r, Qt.AlignCenter, text)
-        x += w
+        p.setPen(QColor(TEXT_DIM if b.boxed else PLUS_GREY))
+        p.drawText(r, Qt.AlignCenter, b.text)
+        x += b.width
 
 
 class HotkeyButton(QPushButton):
@@ -1161,7 +1200,7 @@ class HotkeyButton(QPushButton):
     def sizeHint(self):
         s = super().sizeHint()
         if self.objectName() == "pillkey" and self.hotkey and not self.recording:
-            s.setWidth(int(sum(w for _, w, _ in key_blocks(QFontMetrics(self.font()), self.hotkey["text"]))) + 3)
+            s.setWidth(int(blocks_width(key_blocks(QFontMetrics(self.font()), self.hotkey["text"]))) + 3)
         return s
 
     def set_clash(self, actions: list[str]):
@@ -1176,8 +1215,7 @@ class HotkeyButton(QPushButton):
     def _refresh(self):
         self.setProperty("recording", self.recording)
         self.setProperty("empty", not self.hotkey and not self.recording)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        repolish(self)
         self.setText("Press a key…" if self.recording else (self.hotkey["text"] if self.hotkey else "None"))
 
     def start(self):
@@ -1341,8 +1379,7 @@ class NodePicker(QPushButton):
         self.setProperty("empty", not self.sel)
         self.setProperty("all", any(s.get("all") for s in self.sel))
         self.setProperty("missing", bool(self.sel) and len(self._missing()) == len(self.sel))
-        self.style().unpolish(self)
-        self.style().polish(self)
+        repolish(self)
         self._full = sel_text(self.sel)
         tip = self._full if self.sel else "Click to pick nodes"
         if self._missing():
@@ -1389,7 +1426,8 @@ class NodePicker(QPushButton):
                 m.addAction(a)
                 node_actions.append(a)
         for s in self._missing():
-            a = QAction(f"{s['label'] or 'Node %02d' % s['index']}   (not on this clip)", m, checkable=True)
+            label = s["label"] or f"Node {s['index']:02d}"
+            a = QAction(f"{label}   (not on this clip)", m, checkable=True)
             a.setData(dict(s))
             a.setChecked(True)
             m.addAction(a)
@@ -1446,7 +1484,11 @@ class Overlay(QWidget):
     ICON, GAP = 9, 10           # tab icons: 9 px, with 10 px of space all round them
     TAB = ICON + 2 * GAP        # visible width of the icon tab on the left
     TUCK = 10                   # how far the tab runs on, hidden behind the panel
-    W = TAB + 266               # tab + scene panel
+    PANEL_W = 266               # the scene panel, right of the tab
+    W = TAB + PANEL_W
+    FIELD_R = 8                 # row field: gap to the window's right edge
+    DOT, NAME_X = 7, 25         # row dot: size, also its inset in the field; the name starts NAME_X in
+    KEY_H, KEY_R, NAME_GAP = 14, 12, 8  # key blocks: height, gap to the right edge; gap between name and keys
     LEFT = TAB + PAD            # rows start here (panel edge + padding)
     OUTER_R = 5                 # panel and tab share one corner radius; scene fields (3 px) nest inside it
     TIPS = {"main": "Show / hide the DaKillswitch window", "quit": "Quit DaKillswitch"}
@@ -1507,8 +1549,8 @@ class Overlay(QWidget):
             armed = configured and t["on"] is None
             p.setPen(QPen(QColor(LINE), 1))  # each scene in its own field, like a layer-shortcut pill
             p.setBrush(QColor(FIELD))
-            p.drawRoundedRect(QRectF(x0 + 0.5, y + 2.5, self.W - x0 - 8, self.ROW_H - 5), 3, 3)
-            r = QRectF(x0 + 7, y + self.ROW_H / 2 - 3.5, 7, 7)
+            p.drawRoundedRect(QRectF(x0 + 0.5, y + 2.5, self.W - x0 - self.FIELD_R, self.ROW_H - 5), 3, 3)
+            r = QRectF(x0 + self.DOT, y + (self.ROW_H - self.DOT) / 2, self.DOT, self.DOT)
             if on:
                 p.setPen(Qt.NoPen)
                 p.setBrush(ON_COLOR)
@@ -1524,12 +1566,12 @@ class Overlay(QWidget):
             p.setFont(name_font)
             p.setPen(QColor(TEXT_BRIGHT) if on else QColor(TEXT) if armed else QColor(TEXT_FAINT))
             blocks = key_blocks(kfm, t["hotkey"]["text"]) if t.get("hotkey") else []
-            kw = sum(w for _, w, _ in blocks)
-            name_w = self.W - x0 - 25 - 12 - kw - 8
+            kw = blocks_width(blocks)
+            name_w = self.W - x0 - self.NAME_X - self.KEY_R - kw - self.NAME_GAP
             name = QFontMetrics(name_font).elidedText(t["name"], Qt.ElideRight, name_w)
-            p.drawText(QRectF(x0 + 25, y, name_w, self.ROW_H), Qt.AlignLeft | Qt.AlignVCenter, name)
+            p.drawText(QRectF(x0 + self.NAME_X, y, name_w, self.ROW_H), Qt.AlignLeft | Qt.AlignVCenter, name)
             p.setFont(key_font)
-            draw_key_blocks(p, self.W - 12 - kw, y + self.ROW_H / 2 - 7, 14, blocks)
+            draw_key_blocks(p, self.W - self.KEY_R - kw, y + (self.ROW_H - self.KEY_H) / 2, self.KEY_H, blocks)
         c = self._icon_centers()
         p.setBrush(Qt.NoBrush)
         # window icon (two overlapping windows): gold while the main window is open, like the pin
@@ -2094,21 +2136,11 @@ MONO = 'Consolas, Menlo, "DejaVu Sans Mono", monospace'
 STYLE = f"""
 * {{ font-family: {FONT}; font-size: 9pt; color: {TEXT}; }}
 QMainWindow, QWidget#root {{ background: {BG}; }}
-QLabel#title {{ font-size: 10.5pt; font-weight: 600; color: {TEXT_BRIGHT}; }}
 QLabel#muted {{ color: {TEXT_DIM}; }}
 QLabel#flash {{ color: {ACCENT}; }}
 QLabel#flash[idle="true"] {{ color: {TEXT_FAINT}; }}
 QLabel#rowlabel {{ color: {TEXT_DIM}; padding-right: 8px; }}
 QLabel#rowlabel[layer="true"] {{ color: {TEXT}; }}
-QLineEdit#rowedit {{ background: transparent; border: 1px solid transparent; border-radius: 3px; padding: 0 2px;
-    margin-left: -3px; color: {TEXT}; }}
-QLineEdit#rowedit:hover {{ border-color: {BTN}; }}
-QLineEdit#rowedit:focus {{ border-color: {BLUE}; background: {FIELD}; }}
-QLabel#chip {{ font-family: {MONO}; font-size: 8pt; padding: 0 2px; }}
-QLabel#chip[state="on"] {{ color: {ACCENT}; }}
-QLabel#chip[state="off"] {{ color: {TEXT_DIM}; }}
-QLabel#chip[state="idle"] {{ color: {TEXT_FAINT}; }}
-QLabel#chip[state="armed"] {{ color: {ACCENT}; }}
 QLabel#one {{ font-size: 7pt; color: {TEXT_DIM}; border: 1px solid {BTN}; border-radius: 2px; padding: 0 3px;
     min-height: 12px; max-height: 12px; }}
 QFrame#grid {{ background: {BG_GRID}; border: 1px solid {LINE}; border-radius: 2px; }}
@@ -2768,7 +2800,7 @@ class MainWindow(QMainWindow):
             else:
                 missing.append(tag["name"])
         if missing:
-            self.flash(f"No node labelled {', '.join('“%s”' % m for m in missing)} on this clip")
+            self.flash(f"No node labelled {', '.join(f'“{m}”' for m in missing)} on this clip")
         elif not quiet_found:
             self.flash("Node Label states synced with the open clip")
 

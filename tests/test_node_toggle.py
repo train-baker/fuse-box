@@ -1,14 +1,12 @@
 import ctypes
 import plistlib
-import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import node_toggle as nt  # noqa: E402
+import node_toggle as nt
 
 
 @pytest.mark.parametrize("text", ["{not json", "[1, 2]"])
@@ -134,3 +132,9 @@ def test_builtin_layout_without_saved_preset(tmp_path, monkeypatch):
     keys = nt.ResolveShortcuts()
     keys.load()
     assert keys.status == "builtin" and not keys.by_combo
+
+
+def test_plus_key_hotkey_matches_resolve_combo():
+    from PySide6.QtCore import Qt
+    resolve = nt.ResolveShortcuts._combo(int(Qt.Key_Plus) | 0x04000000)  # Ctrl + "+" as Resolve stores it
+    assert nt.ResolveShortcuts.hotkey_combo({"mods": ["ctrl"], "text": "Ctrl++"}) == resolve
