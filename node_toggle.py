@@ -1048,36 +1048,37 @@ class StateDot(QWidget):
         p.drawEllipse(QRectF(3, 3, self._size, self._size))
 
 
-MOD_COLORS = {"ctrl": QColor("#a46c69"), "alt": QColor("#6b9070"), "shift": QColor("#6985a4")}  # muted R / G / B
+def key_parts(text: str) -> list[str]:
+    """'Ctrl+Alt+Shift+Z' -> ['Ctrl', 'Alt', 'Shift', 'Z'] ('Ctrl++' -> ['Ctrl', '+'])."""
+    if text.endswith("+"):  # the key itself is "+"
+        head = text[:-1].rstrip("+")
+        return (head.split("+") if head else []) + ["+"]
+    return text.split("+")
 
 
-def key_segments(text: str, base: QColor | None = None) -> list[tuple[str, QColor]]:
-    """'Ctrl+Alt+Shift+Z' -> coloured pieces: modifiers soft red / green / blue, '+' at 50 %, key at 75 %."""
-    base = QColor(base or QColor(TEXT))
-    plus, key = QColor(base), QColor(base)
-    plus.setAlphaF(0.5)
-    key.setAlphaF(0.75)
-    parts = text.split("+")
-    if text.endswith("++"):  # the key itself is "+"
-        parts = parts[:-2] + ["+"]
+def key_blocks(fm: QFontMetrics, text: str, pad: float = 8) -> list[tuple[str, float, bool]]:
+    """'Ctrl+Alt+S' -> [(text, width, boxed)]: one box per modifier, a single '+' before the key's box."""
+    *mods, key = key_parts(text)
     out = []
-    for i, part in enumerate(parts):
-        last = i == len(parts) - 1
-        c = key if last else MOD_COLORS.get(part.lower(), key)
-        out.append((part, c))
-        if not last:
-            out.append(("+", plus))
+    for m in mods:
+        out.append((m, fm.horizontalAdvance(m) + pad, True))
+        out.append(("", 3, False))  # gap between modifier boxes
+    if mods:
+        out[-1] = ("+", fm.horizontalAdvance("+") + 6, False)
+    out.append((key, fm.horizontalAdvance(key) + pad, True))
     return out
 
 
-def draw_segments(p: QPainter, rect: QRectF, segs, align=Qt.AlignLeft):
-    fm = p.fontMetrics()
-    total = sum(fm.horizontalAdvance(t) for t, _ in segs)
-    x = rect.x() if align == Qt.AlignLeft else rect.center().x() - total / 2
-    for t, c in segs:
-        w = fm.horizontalAdvance(t)
-        p.setPen(c)
-        p.drawText(QRectF(x, rect.y(), w + 1, rect.height()), Qt.AlignLeft | Qt.AlignVCenter, t)
+def draw_key_blocks(p: QPainter, x: float, y: float, h: float, blocks) -> None:
+    """[Ctrl] [Alt] [Shift] + [S]: grey boxes like "None", the '+' a step darker."""
+    for text, w, boxed in blocks:
+        r = QRectF(x, y, w, h)
+        if boxed:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(BTN))
+            p.drawRoundedRect(r, 2, 2)
+        p.setPen(QColor(TEXT_DIM if boxed else PLUS_GREY))
+        p.drawText(r, Qt.AlignCenter, text)
         x += w
 
 
@@ -1106,17 +1107,28 @@ class HotkeyButton(QPushButton):
         if not self.hotkey or self.recording:
             return super().paintEvent(e)
         p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setFont(self.font())
+        blocks = key_blocks(p.fontMetrics(), self.hotkey["text"])
+        if self.objectName() == "pillkey":  # the blocks are the box: no button background behind them
+            if self.property("clash"):
+                p.setPen(QPen(QColor(RED), 1))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 2, 2)
+            draw_key_blocks(p, 1, 1, self.height() - 2, blocks)
+            return
         opt = QStyleOptionButton()
         self.initStyleOption(opt)
         opt.text = ""
         self.style().drawControl(QStyle.CE_PushButton, opt, p, self)
-        p.setFont(self.font())
-        segs = key_segments(self.hotkey["text"])
-        if self.objectName() == "pillkey":  # layer keys: grey like "None", each "+" a step darker
-            segs = [(t, QColor(PLUS_GREY) if i % 2 else QColor(TEXT_DIM)) for i, (t, _) in enumerate(segs)]
-            draw_segments(p, QRectF(self.rect()).adjusted(6, 0, -6, 0), segs, Qt.AlignHCenter)
-        else:
-            draw_segments(p, QRectF(self.rect()).adjusted(9, 0, -4, 0), segs)
+        h = min(16, self.height() - 6)
+        draw_key_blocks(p, 6, (self.height() - h) / 2, h, blocks)
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        if self.objectName() == "pillkey" and self.hotkey and not self.recording:
+            s.setWidth(int(sum(w for _, w, _ in key_blocks(QFontMetrics(self.font()), self.hotkey["text"]))) + 3)
+        return s
 
     def set_clash(self, actions: list[str]):
         self.setProperty("clash", bool(actions))
@@ -1396,7 +1408,7 @@ class Overlay(QWidget):
     close_main = Signal()
     quit_all = Signal()
     moved = Signal(int, int)
-    ROW_H, PAD, W, BTN_H = 19, 6, 228, 17
+    ROW_H, PAD, W, BTN_H = 28, 6, 260, 19  # rows: a 24 px field like a layer-shortcut pill + 4 px gap
     SEP_GAP, BTN_GAP = 3, 6  # extra space above the separator / between separator and buttons
 
     def __init__(self):
@@ -1424,7 +1436,7 @@ class Overlay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(QPen(QColor(LINE), 1))
-        bg = QColor(BG)
+        bg = QColor(BG_GRID)
         bg.setAlpha(240)
         p.setBrush(bg)
         p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 7, 7)
@@ -1432,13 +1444,17 @@ class Overlay(QWidget):
         name_font = QFont(self.font())
         name_font.setPointSizeF(9)
         key_font = QFont("Consolas" if IS_WIN else "Menlo" if IS_MAC else "DejaVu Sans Mono")
-        key_font.setPointSizeF(7.5)
+        key_font.setPointSizeF(8)
+        kfm = QFontMetrics(key_font)
         for i, t in enumerate(self.toggles):
             y = y0 + i * self.ROW_H
             configured = has_selection(t)
             on = configured and t["on"] is True
             armed = configured and t["on"] is None
-            r = QRectF(14, y + self.ROW_H / 2 - 4, 8, 8)
+            p.setPen(QPen(QColor(LINE), 1))  # each scene in its own field, like Resolve's VCA box
+            p.setBrush(QColor(FIELD))
+            p.drawRoundedRect(QRectF(7.5, y + 2.5, self.W - 15, self.ROW_H - 5), 3, 3)  # 24 px with its border
+            r = QRectF(14, y + self.ROW_H / 2 - 3.5, 7, 7)
             if on:
                 p.setPen(Qt.NoPen)
                 p.setBrush(ON_COLOR)
@@ -1453,36 +1469,31 @@ class Overlay(QWidget):
             p.drawEllipse(r)
             p.setFont(name_font)
             p.setPen(QColor(TEXT_BRIGHT) if on else QColor(TEXT) if armed else QColor(TEXT_FAINT))
-            key = t["hotkey"]["text"] if t.get("hotkey") else ""
-            kw = QFontMetrics(key_font).horizontalAdvance(key) + 12 if key else 0
-            name = QFontMetrics(name_font).elidedText(t["name"], Qt.ElideRight, self.W - 40 - kw - 12)
-            p.drawText(QRectF(30, y, self.W - 40 - kw, self.ROW_H), Qt.AlignLeft | Qt.AlignVCenter, name)
-            if key:
-                kr = QRectF(self.W - 10 - kw, y + 2, kw, self.ROW_H - 4)
-                p.setPen(QPen(QColor(LINE), 1))
-                p.setBrush(QColor(FIELD))
-                p.drawRoundedRect(kr, 4, 4)
-                p.setFont(key_font)
-                draw_segments(p, kr, key_segments(key, QColor(TEXT)), Qt.AlignHCenter)
+            blocks = key_blocks(kfm, t["hotkey"]["text"]) if t.get("hotkey") else []
+            kw = sum(w for _, w, _ in blocks)
+            name = QFontMetrics(name_font).elidedText(t["name"], Qt.ElideRight, self.W - 44 - kw - 8)
+            p.drawText(QRectF(32, y, self.W - 44 - kw, self.ROW_H), Qt.AlignLeft | Qt.AlignVCenter, name)
+            p.setFont(key_font)
+            draw_key_blocks(p, self.W - 12 - kw, y + self.ROW_H / 2 - 7, 14, blocks)
         top = self._btn_top()
         p.setPen(QPen(QColor(LINE), 1))  # divider, like Resolve's
-        p.drawLine(QPointF(12, top), QPointF(self.W - 12, top))
+        p.drawLine(QPointF(7, top), QPointF(self.W - 7, top))  # as wide as the scene boxes
         cy = top + self.BTN_GAP + self.BTN_H / 2
         p.setOpacity(1.0 if self._hover_btn == "open" else 0.7)  # app icon: open / bring forward the main window
-        s = 13
+        s = 15
         p.drawPixmap(QRectF(18 - s / 2, cy - s / 2, s, s).toRect(), _icon_pixmap())  # lined up with the dots
-        pen = QPen(ICON_GREY, 1.3)
+        pen = QPen(ICON_GREY, 1.4)
         pen.setCapStyle(Qt.RoundCap)
         p.setPen(pen)
         p.setBrush(Qt.NoBrush)
         # ✕: close (hide) the main window; greyed out while it's already closed
         p.setOpacity((1.0 if self._hover_btn == "close" else 0.7) if self.main_open else 0.22)
-        d = 3.5
-        p.drawLine(QPointF(38 - d, cy - d), QPointF(38 + d, cy + d))
-        p.drawLine(QPointF(38 + d, cy - d), QPointF(38 - d, cy + d))
+        x, d = 40, 4
+        p.drawLine(QPointF(x - d, cy - d), QPointF(x + d, cy + d))
+        p.drawLine(QPointF(x + d, cy - d), QPointF(x - d, cy + d))
         # power symbol next to it: close everything (main window and overlay)
         p.setOpacity(1.0 if self._hover_btn == "quit" else 0.7)
-        x, r = 58, 3.8
+        x, r = 62, 4.5
         p.drawArc(QRectF(x - r, cy - r + 0.5, 2 * r, 2 * r), 125 * 16, 290 * 16)
         p.drawLine(QPointF(x, cy - r - 0.5), QPointF(x, cy))
         p.setOpacity(1.0)
@@ -1491,11 +1502,11 @@ class Overlay(QWidget):
         if pos.y() < self._btn_top():
             return None
         x = pos.x()
-        if x <= 28:
+        if x <= 29:
             return "open"
-        if x <= 47:
+        if x <= 51:
             return "close" if self.main_open else None
-        return "quit" if x <= 68 else None
+        return "quit" if x <= 73 else None
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -2047,10 +2058,10 @@ QLabel#one {{ font-size: 7pt; color: {TEXT_DIM}; border: 1px solid {BTN}; border
 QFrame#grid {{ background: {BG_GRID}; border: 1px solid {LINE}; border-radius: 2px; }}
 QFrame#sep {{ background: {LINE}; max-height: 1px; min-height: 1px; }}
 QLineEdit#colname {{ background: {BG_DARK}; border: 1px solid transparent; border-top: 2px solid {GREEN};
-    border-radius: 0; padding: 3px 8px; color: {TEXT}; font-size: 9pt; }}
+    border-radius: 0; padding: 7px 8px 3px 8px; color: {TEXT}; font-size: 9pt; }}
 QLineEdit#colname:hover {{ border-left-color: {BTN}; border-right-color: {BTN}; border-bottom-color: {BTN}; }}
-QLineEdit#colname:focus {{ border-left-color: {BLUE}; border-right-color: {BLUE}; border-bottom-color: {BLUE};
-    background: {FIELD}; color: {TEXT_BRIGHT}; }}
+QLineEdit#colname:focus {{ border-left-color: transparent; border-right-color: transparent;
+    border-bottom-color: transparent; background: {FIELD}; color: {TEXT_BRIGHT}; }}
 QPushButton {{ background: {BTN}; border: 1px solid {LINE}; border-radius: 3px; padding: 4px 10px; color: {TEXT}; }}
 QPushButton:hover {{ background: {BTN_HOVER}; }}
 QPushButton:pressed {{ background: {FIELD}; }}

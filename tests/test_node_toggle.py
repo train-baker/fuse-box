@@ -80,3 +80,13 @@ def test_watch_survives_failed_open_process(monkeypatch):
     alive["pid"] = None
     assert gone.wait(3)
     assert watch.lost
+
+
+@pytest.mark.parametrize("text, parts", [
+    ("Ctrl+Alt+Shift+S", ["Ctrl", "Alt", "Shift", "S"]),
+    ("F4", ["F4"]),
+    ("Ctrl++", ["Ctrl", "+"]),
+    ("+", ["+"]),
+])
+def test_key_parts(text, parts):
+    assert nt.key_parts(text) == parts
