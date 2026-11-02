@@ -51,14 +51,16 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QPalette, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QPixmap
+from PySide6.QtGui import (
+    QAction, QColor, QPalette, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow, QMenu,
-    QMessageBox, QPushButton, QSizePolicy, QStyle, QStyleOptionButton, QVBoxLayout, QWidget,
+    QMessageBox, QProxyStyle, QPushButton, QSizePolicy, QStyle, QStyleOptionButton, QVBoxLayout, QWidget,
 )
 
 APP_NAME = "DaKillswitch"
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.4 r21"
 NUM_TOGGLES = 5
 NUM_PRESETS = 3
 MAX_LAYERS = 16
@@ -1433,15 +1435,19 @@ class NodePicker(QPushButton):
 
 
 class Overlay(QWidget):
-    """Frameless always-on-top status panel. Drag to move, click a row to toggle,
-    click the strip at the bottom to open the main window."""
+    """Frameless always-on-top status panel. Drag to move, click a row to toggle. The icons in the
+    left column: window = show / hide the main window (gold while it's open), X = quit DaKillswitch."""
     row_clicked = Signal(int)
     open_main = Signal()
     close_main = Signal()
     quit_all = Signal()
     moved = Signal(int, int)
-    ROW_H, PAD, W, BTN_H = 28, 6, 260, 19  # rows: a 24 px field like a layer-shortcut pill + 4 px gap
-    SEP_GAP, BTN_GAP = 3, 6  # extra space above the separator / between separator and buttons
+    ROW_H, PAD, W = 28, 6, 298  # rows: a 24 px field like a layer-shortcut pill + 4 px gap
+    TAB = 32                    # visible width of the icon tab on the left
+    TUCK = 10                   # how far the tab runs on, hidden behind the panel
+    LEFT = TAB + PAD            # rows start here (panel edge + padding)
+    OUTER_R = 5                 # panel and tab share one corner radius; scene fields (3 px) nest inside it
+    TIPS = {"main": "Show / hide the DaKillswitch window", "quit": "Quit DaKillswitch"}
 
     def __init__(self):
         flags = Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus
@@ -1451,42 +1457,62 @@ class Overlay(QWidget):
         self.toggles: list[dict] = []
         self._press = None
         self._drag_origin = None
-        self._hover_btn = None  # "open" / "close" / "quit" / None
-        self.main_open = False  # the close button only shows while the main window is open
+        self._hover_btn = None  # "main" / "quit" / None
+        self.main_open = False  # the window icon is gold while the main window is open
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
 
     def set_toggles(self, toggles):
         self.toggles = toggles
-        self.setFixedSize(self.W, self.PAD * 2 + self.ROW_H * len(toggles) + self.BTN_H + self.SEP_GAP + self.BTN_GAP)
+        self.setFixedSize(self.W, self.PAD * 2 + self.ROW_H * len(toggles))
         self.update()
 
-    def _btn_top(self) -> float:  # the separator line; the button strip is everything below it
-        return self.PAD + self.ROW_H * len(self.toggles) + 2 + self.SEP_GAP
+    def _icon_rows(self) -> tuple[int, int]:  # the two icons line up with the last two scene rows
+        n = len(self.toggles)
+        return max(0, n - 2), max(0, n - 1)
+
+    def _row_cy(self, i: int) -> float:
+        return self.PAD + i * self.ROW_H + self.ROW_H / 2
+
+    def _icon_centers(self) -> dict[str, QPointF]:
+        a, b = self._icon_rows()
+        return {"main": QPointF(self.TAB / 2, self._row_cy(a)), "quit": QPointF(self.TAB / 2, self._row_cy(b))}
+
+    def _panel_rect(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(self.TAB + 0.5, 0.5, -0.5, -0.5)
+
+    def _tab_rect(self) -> QRectF:
+        """Its own piece, coming out from behind the panel's left edge: from the top of the
+        second-to-last scene field to the bottom of the last, with the panel's padding around them."""
+        a, _ = self._icon_rows()
+        top = self.PAD + a * self.ROW_H  # same gap above the field as the panel has above its first one
+        return QRectF(0.5, top + 0.5, self.TAB + self.TUCK, self.height() - top - 1)
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(QPen(QColor(LINE), 1))
-        bg = QColor(BG_GRID)
-        bg.setAlpha(240)
-        p.setBrush(bg)
-        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 7, 7)
-        y0 = self.PAD
+        tab_bg = QColor(BG_GRID).darker(118)  # the tab first, a shade darker, so the panel sits in front of it
+        tab_bg.setAlpha(245)
+        p.setBrush(tab_bg)
+        p.drawRoundedRect(self._tab_rect(), self.OUTER_R, self.OUTER_R)
+        p.setBrush(QColor(BG_GRID))
+        p.drawRoundedRect(self._panel_rect(), self.OUTER_R, self.OUTER_R)
         name_font = QFont(self.font())
         name_font.setPointSizeF(9)
         key_font = QFont("Consolas" if IS_WIN else "Menlo" if IS_MAC else "DejaVu Sans Mono")
         key_font.setPointSizeF(8)
         kfm = QFontMetrics(key_font)
+        x0 = self.LEFT
         for i, t in enumerate(self.toggles):
-            y = y0 + i * self.ROW_H
+            y = self.PAD + i * self.ROW_H
             configured = has_selection(t)
             on = configured and t["on"] is True
             armed = configured and t["on"] is None
-            p.setPen(QPen(QColor(LINE), 1))  # each scene in its own field, like Resolve's VCA box
+            p.setPen(QPen(QColor(LINE), 1))  # each scene in its own field, like a layer-shortcut pill
             p.setBrush(QColor(FIELD))
-            p.drawRoundedRect(QRectF(7.5, y + 2.5, self.W - 15, self.ROW_H - 5), 3, 3)  # 24 px with its border
-            r = QRectF(14, y + self.ROW_H / 2 - 3.5, 7, 7)
+            p.drawRoundedRect(QRectF(x0 + 0.5, y + 2.5, self.W - x0 - 8, self.ROW_H - 5), 3, 3)
+            r = QRectF(x0 + 7, y + self.ROW_H / 2 - 3.5, 7, 7)
             if on:
                 p.setPen(Qt.NoPen)
                 p.setBrush(ON_COLOR)
@@ -1503,42 +1529,36 @@ class Overlay(QWidget):
             p.setPen(QColor(TEXT_BRIGHT) if on else QColor(TEXT) if armed else QColor(TEXT_FAINT))
             blocks = key_blocks(kfm, t["hotkey"]["text"]) if t.get("hotkey") else []
             kw = sum(w for _, w, _ in blocks)
-            name = QFontMetrics(name_font).elidedText(t["name"], Qt.ElideRight, self.W - 44 - kw - 8)
-            p.drawText(QRectF(32, y, self.W - 44 - kw, self.ROW_H), Qt.AlignLeft | Qt.AlignVCenter, name)
+            name_w = self.W - x0 - 25 - 12 - kw - 8
+            name = QFontMetrics(name_font).elidedText(t["name"], Qt.ElideRight, name_w)
+            p.drawText(QRectF(x0 + 25, y, name_w, self.ROW_H), Qt.AlignLeft | Qt.AlignVCenter, name)
             p.setFont(key_font)
             draw_key_blocks(p, self.W - 12 - kw, y + self.ROW_H / 2 - 7, 14, blocks)
-        top = self._btn_top()
-        p.setPen(QPen(QColor(LINE), 1))  # divider, like Resolve's
-        p.drawLine(QPointF(7, top), QPointF(self.W - 7, top))  # as wide as the scene boxes
-        cy = top + self.BTN_GAP + self.BTN_H / 2
-        p.setOpacity(1.0 if self._hover_btn == "open" else 0.7)  # app icon: open / bring forward the main window
-        s = 15
-        p.drawPixmap(QRectF(18 - s / 2, cy - s / 2, s, s).toRect(), _icon_pixmap())  # lined up with the dots
-        pen = QPen(ICON_GREY, 1.4)
-        pen.setCapStyle(Qt.RoundCap)
-        p.setPen(pen)
+        c = self._icon_centers()
         p.setBrush(Qt.NoBrush)
-        # ✕: close (hide) the main window; greyed out while it's already closed
-        p.setOpacity((1.0 if self._hover_btn == "close" else 0.7) if self.main_open else 0.22)
-        x, d = 40, 4
-        p.drawLine(QPointF(x - d, cy - d), QPointF(x + d, cy + d))
-        p.drawLine(QPointF(x + d, cy - d), QPointF(x - d, cy + d))
-        # power symbol next to it: close everything (main window and overlay)
-        p.setOpacity(1.0 if self._hover_btn == "quit" else 0.7)
-        x, r = 62, 4.5
-        p.drawArc(QRectF(x - r, cy - r + 0.5, 2 * r, 2 * r), 125 * 16, 290 * 16)
-        p.drawLine(QPointF(x, cy - r - 0.5), QPointF(x, cy))
+        # window icon (two overlapping windows): gold while the main window is open, like the pin
+        p.setOpacity(1.0 if self._hover_btn == "main" else 0.8)
+        pen = QPen(QColor(ACCENT) if self.main_open else QColor(TEXT_DIM), 1.3)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        m = c["main"]
+        p.drawRoundedRect(QRectF(m.x() - 2.5, m.y() - 2.5, 8, 8), 1.5, 1.5)  # front window
+        p.drawPolyline([QPointF(m.x() - 5.5, m.y() + 2.5), QPointF(m.x() - 5.5, m.y() - 5.5),
+                        QPointF(m.x() + 2.5, m.y() - 5.5)])  # back window, peeking out top-left
+        # X: quit DaKillswitch
+        p.setOpacity(1.0 if self._hover_btn == "quit" else 0.8)
+        pen.setColor(ICON_GREY)
+        p.setPen(pen)
+        q, d = c["quit"], 4
+        p.drawLine(QPointF(q.x() - d, q.y() - d), QPointF(q.x() + d, q.y() + d))
+        p.drawLine(QPointF(q.x() + d, q.y() - d), QPointF(q.x() - d, q.y() + d))
         p.setOpacity(1.0)
 
     def _zone(self, pos):
-        if pos.y() < self._btn_top():
+        if pos.x() >= self.TAB:
             return None
-        x = pos.x()
-        if x <= 29:
-            return "open"
-        if x <= 51:
-            return "close" if self.main_open else None
-        return "quit" if x <= 73 else None
+        return next((k for k, c in self._icon_centers().items() if abs(pos.y() - c.y()) <= self.ROW_H / 2), None)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -1551,6 +1571,7 @@ class Overlay(QWidget):
         hover = self._zone(e.position())
         if hover != self._hover_btn:
             self._hover_btn = hover
+            self.setToolTip(self.TIPS.get(hover, ""))
             self.update()
 
     def leaveEvent(self, e):
@@ -1565,18 +1586,15 @@ class Overlay(QWidget):
         if delta.manhattanLength() > 4:
             self.moved.emit(self.x(), self.y())
             return
-        if e.position().y() >= self._btn_top():
-            zone = self._zone(e.position())
-            if zone == "open":
-                self.open_main.emit()
-            elif zone == "close":
-                self.close_main.emit()
-            elif zone == "quit":
-                self.quit_all.emit()
-            return
-        row = int((e.position().y() - self.PAD) // self.ROW_H)
-        if 0 <= row < len(self.toggles):
-            self.row_clicked.emit(row)
+        zone = self._zone(e.position())
+        if zone == "main":
+            (self.close_main if self.main_open else self.open_main).emit()
+        elif zone == "quit":
+            self.quit_all.emit()
+        elif e.position().x() >= self.TAB:
+            row = int((e.position().y() - self.PAD) // self.ROW_H)
+            if 0 <= row < len(self.toggles):
+                self.row_clicked.emit(row)
 
 
 class FlowLayout(QLayout):
@@ -2035,13 +2053,14 @@ class LayerPill(QFrame):
         self.key = key
         self.setObjectName("pill")
         self.setFixedHeight(24)
-        self.setToolTip(tip + "\nClick the dot to flip · right-click for options")
+        self.setToolTip(tip + "\nClick the dot or name to flip · right-click for options")
         h = QHBoxLayout(self)
         h.setContentsMargins(6, 0, 4, 0)
         h.setSpacing(6)
         self.dot = DotButton(self)
         self.dot.clicked.connect(lambda: self.flip.emit(self.key))
         self.name = QLabel(title, objectName="pillname")
+        self.name.setCursor(Qt.PointingHandCursor)  # clicking the name flips too (see mouseReleaseEvent)
         self.one = QLabel("1 clip", objectName="one")
         self.one.setToolTip("This clip only")
         self.one.setAlignment(Qt.AlignCenter)
@@ -2053,6 +2072,13 @@ class LayerPill(QFrame):
             h.addWidget(w)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(lambda pos: self.menu.emit(self.key, self.mapToGlobal(pos)))
+
+    def mousePressEvent(self, e):  # labels pass clicks up to the pill; accept so the release comes here too
+        e.setAccepted(e.button() == Qt.LeftButton)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.name.geometry().contains(e.position().toPoint()):
+            self.flip.emit(self.key)
 
     def set_state(self, on: bool, one_clip: bool):
         self.dot.set_on(on)
@@ -2152,16 +2178,6 @@ QMenu::indicator:checked {{ background: {BLUE}; }}
 QMenu::separator {{ height: 1px; background: {LINE}; margin: 4px 2px; }}
 QToolTip {{ background: {BG_DARK}; color: {TEXT}; border: 1px solid {BTN}; padding: 4px 6px; }}
 """
-
-
-_ICON_PM = None
-
-
-def _icon_pixmap() -> QPixmap:
-    global _ICON_PM
-    if _ICON_PM is None:
-        _ICON_PM = make_icon().pixmap(64, 64)
-    return _ICON_PM
 
 
 def on_screen(x, y) -> bool:
@@ -3379,6 +3395,17 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
+class AppStyle(QProxyStyle):
+    """Fusion, with tooltips only after resting on an item for 2 s, every time."""
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.SH_ToolTip_WakeUpDelay:
+            return 2000
+        if hint == QStyle.SH_ToolTip_FallAsleepDelay:  # else, after one tooltip, the next ones pop up at once
+            return 0
+        return super().styleHint(hint, option, widget, returnData)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--demo", action="store_true", help="use a fake Resolve to try the UI")
@@ -3389,7 +3416,7 @@ def main():
         sys.path.insert(0, str(Path(__file__).resolve().parent))
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    app.setStyle("Fusion")
+    app.setStyle(AppStyle("Fusion"))
     pal = app.palette()  # dark from the very first paint, before the stylesheet kicks in
     for role in (QPalette.Window, QPalette.Base, QPalette.Button):
         pal.setColor(role, QColor(BG))
