@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "DaKillswitch"
-APP_VERSION = "0.1.2 r21"
+APP_VERSION = "0.1.3"
 NUM_TOGGLES = 5
 NUM_PRESETS = 3
 MAX_LAYERS = 16
@@ -1944,16 +1944,13 @@ class PinButton(QPushButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         c = QColor(ACCENT) if self.isChecked() else QColor(TEXT_DIM)
-        cx, cy = self.width() / 2, self.height() / 2
-        p.translate(cx, cy)
-        p.rotate(45)
-        pen = QPen(c, 1.4)
+        p.translate(self.width() / 2, self.height() / 2)
+        pen = QPen(c, 1.3)
         pen.setCapStyle(Qt.RoundCap)
         p.setPen(pen)
         p.setBrush(c if self.isChecked() else Qt.NoBrush)
-        p.drawRoundedRect(QRectF(-3, -7, 6, 6), 1.5, 1.5)   # head
-        p.drawLine(QPointF(-5, -1), QPointF(5, -1))          # collar
-        p.drawLine(QPointF(0, -1), QPointF(0, 7))            # needle
+        p.drawEllipse(QPointF(0, -2.5), 3, 3)          # head
+        p.drawLine(QPointF(0, 0.5), QPointF(0, 6))     # needle
 
 
 class DotButton(QPushButton):
@@ -2059,6 +2056,7 @@ QPushButton:hover {{ background: {BTN_HOVER}; }}
 QPushButton:pressed {{ background: {FIELD}; }}
 QPushButton:disabled {{ color: {TEXT_FAINT}; background: {BG_DARK}; }}
 QPushButton:checked {{ background: {BLUE}; color: {LINE}; }}
+QPushButton[head="true"]:checked, QPushButton[head="true"]:pressed {{ background: {FIELD}; color: {ACCENT}; }}
 QPushButton#ib {{ background: transparent; border: none; padding: 0; }}
 QPushButton#cell {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px; padding: 3px 8px;
     text-align: left; color: {TEXT}; min-height: 18px; }}
@@ -2262,6 +2260,9 @@ class MainWindow(QMainWindow):
         self.btn_overlay.setChecked(self.cfg["overlay"].get("visible", True))
         self.btn_overlay.toggled.connect(self._set_overlay_visible)
         h.addWidget(self.btn_overlay)
+        for i in range(h.count()):
+            if w := h.itemAt(i).widget():
+                w.setProperty("head", True)  # styled: darker with yellow text when down
         v.addLayout(h)
 
         # grid
