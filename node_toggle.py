@@ -8,7 +8,7 @@ Fuse Box (formerly Node Toggle) — switch DaVinci Resolve color nodes on and of
   * scenes, layer keys and node tags act on every enabled clip by default
     (right-click a state chip for "This clip only")
   * layer shortcuts: one key per layer / group to switch it off and on whole
-  * node labels: type a Resolve node label (e.g. NR); it starts ARMED (grey), its ON / OFF boxes
+  * node labels: type a Resolve node label (e.g. NR); it starts on HOLD (grey), its ON / OFF boxes
     switch every node with that label on every layer of every enabled clip; turns red when a scene
     picks the same nodes with the opposite state
   * turning a layer / group back ON keeps nodes off that should stay off
@@ -38,6 +38,7 @@ import argparse
 import contextlib
 import copy
 import json
+import math
 import os
 import plistlib
 import re
@@ -58,6 +59,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QIcon,
+    QImage,
     QKeySequence,
     QPainter,
     QPalette,
@@ -86,7 +88,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Fuse Box"
-APP_VERSION = "0.1.4 r21"
+APP_VERSION = "0.2.0"
 NUM_TOGGLES = 5
 NUM_PRESETS = 3
 MAX_LAYERS = 16
@@ -97,9 +99,12 @@ IS_MAC = sys.platform == "darwin"
 BG = "#28282e"          # panel
 BG_DARK = "#212126"     # headers, window frame
 BG_GRID = "#24242a"     # strip area
-BORDER = "#1a1a1e"      # the main window's outer edge (Windows 11), a step darker than BG_GRID
+BORDER = "#16161a"      # the main window's outer edge (Windows 11): BG_GRID's step-darker edge, 15 % darker
+TITLE_TEXT = "#8a7a5c"  # title-bar text (Windows 11): the muted gold of a missing scene pick
+TITLE_BG = "#202020"    # Windows 11's own dark title bar, for the faint circle in its icon slot
 FIELD = "#1f1f1f"       # input fields
 LINE = "#090909"        # dividers and field borders
+EDGE = "#18181c"        # outline of the grid box and the overlay, grid dividers: softer than LINE
 BTN = "#3b3b3f"         # buttons (R / S / M, In)
 BTN_HOVER = "#46464b"
 TEXT = "#b8b8ba"        # names
@@ -110,6 +115,8 @@ TEXT_BRIGHT = "#ffffff"  # panel title
 ACCENT = "#c3931d"      # Resolve orange (bus names, active)
 BLUE = "#156284"        # selection (assigned bus)
 GREEN = "#448f64"       # track colour stripe
+# the bar over each scene name, Resolve clip colours: Green, Apricot, Purple, Blue, Tan
+SCENE_COLORS = [GREEN, "#ffa833", "#9972a0", "#4376a1", "#b9af97"]
 RED = "#e64b3d"         # record
 
 ON_COLOR = QColor(ACCENT)
@@ -152,7 +159,7 @@ def config_path(demo: bool) -> Path:
 
 
 def default_toggle(i: int) -> dict:
-    return {"name": f"Scene {i + 1}", "hotkey": None, "on": None, "one_clip": False, "sel": {}}  # on: None = ARMED (state unknown)
+    return {"name": f"Scene {i + 1}", "hotkey": None, "on": None, "one_clip": False, "sel": {}}  # on: None = HOLD (state unknown)
 
 
 def clean_sel(sel: dict) -> dict:
@@ -186,7 +193,7 @@ def default_config() -> dict:
         "pinned": False,      # keep the main window above Resolve
         "window": {"x": None, "y": None},  # main window position, restored next launch
         "layer_keys": {},     # slot or "tags" -> {"hotkey", "on", "one_clip"}
-        "tags": [],           # node labels: {"name", "on": True|False|None (ARMED), "scope": "F"|"P", "project"}
+        "tags": [],           # node labels: {"name", "on": True|False|None (HOLD), "scope": "F"|"P", "project"}
         "layer_names": {},    # "1" -> "--- L1" (Resolve's layer names aren't readable by scripts)
     }
 
@@ -1119,11 +1126,11 @@ def key_parts(text: str) -> list[str]:
 class Block(NamedTuple):
     text: str
     width: float
-    boxed: bool  # a key box; False for the gap and the '+' between them
+    boxed: bool  # a modifier box; False for the gap, the '+' and the key
 
 
 def key_blocks(fm: QFontMetrics, text: str, pad: float = 8) -> list[Block]:
-    """'Ctrl+Alt+S' -> [Ctrl] [Alt] + [S]: one box per modifier, a single '+' before the key's box."""
+    """'Ctrl+Alt+S' -> [Ctrl] [Alt] + S: one box per modifier, then a single '+' and the key, unboxed."""
     def box(t: str) -> Block:
         return Block(t, fm.horizontalAdvance(t) + pad, True)
 
@@ -1135,7 +1142,7 @@ def key_blocks(fm: QFontMetrics, text: str, pad: float = 8) -> list[Block]:
         out.append(box(m))
     if mods:
         out.append(Block("+", fm.horizontalAdvance("+") + 6, False))
-    out.append(box(key))
+    out.append(Block(key, fm.horizontalAdvance(key) + 6, False))
     return out
 
 
@@ -1144,14 +1151,14 @@ def blocks_width(blocks: list[Block]) -> float:
 
 
 def draw_key_blocks(p: QPainter, x: float, y: float, h: float, blocks: list[Block]) -> None:
-    """[Ctrl] [Alt] [Shift] + [S]: grey boxes like "None", the '+' a step darker."""
-    for b in blocks:
+    """[Ctrl] [Alt] [Shift] + S: grey boxes like "None", the '+' a step darker, the key brighter to read."""
+    for i, b in enumerate(blocks):
         r = QRectF(x, y, b.width, h)
         if b.boxed:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(BTN))
             p.drawRoundedRect(r, 2, 2)
-        p.setPen(QColor(TEXT_DIM if b.boxed else PLUS_GREY))
+        p.setPen(QColor(TEXT_DIM if b.boxed else TEXT if i == len(blocks) - 1 else PLUS_GREY))
         p.drawText(r, Qt.AlignCenter, b.text)
         x += b.width
 
@@ -1171,11 +1178,25 @@ class HotkeyButton(QPushButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Click, then press a key or combo.\nEsc cancels · Backspace clears")
         self.clicked.connect(self.start)
+        # the painted ✕ of the node-label chips, not a letter, so it can't be read as an X key; a layer pill
+        # takes it into its own row, otherwise it sits at the cell's right end
+        self.clear = IconButton("x", "Remove this shortcut", parent=self)
+        self.clear.clicked.connect(self.clear_hotkey)
         self._refresh()
 
     def set_hotkey(self, hk):
         self.hotkey = hk
         self._refresh()
+
+    def clear_hotkey(self):
+        self.hotkey = None
+        self._refresh()
+        self.changed.emit(None)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.clear.parent() is self:
+            self.clear.move(self.width() - self.clear.width() - 7, (self.height() - self.clear.height()) // 2)
 
     def paintEvent(self, e):
         if not self.hotkey or self.recording:
@@ -1217,7 +1238,8 @@ class HotkeyButton(QPushButton):
         self.setProperty("recording", self.recording)
         self.setProperty("empty", not self.hotkey and not self.recording)
         repolish(self)
-        self.setText("Press a key…" if self.recording else (self.hotkey["text"] if self.hotkey else "None"))
+        self.clear.setVisible(bool(self.hotkey) and not self.recording)
+        self.setText("Press a key" if self.recording else (self.hotkey["text"] if self.hotkey else "None"))
 
     def start(self):
         self.recording = True
@@ -1392,7 +1414,7 @@ class NodePicker(QPushButton):
         self._elide()
 
     def _elide(self):
-        w = max(20, self.width() - 22)
+        w = max(20, self.width() - (34 if self.label_clash else 22))  # clear of the red dot
         self.setText(QFontMetrics(self.font()).elidedText(self._full, Qt.ElideRight, w))
 
     def resizeEvent(self, e):
@@ -1523,14 +1545,14 @@ class Overlay(QWidget):
 
     def _tab_rect(self) -> QRectF:
         """Its own piece, coming out from behind the panel's left edge, bottom-aligned with it,
-        just big enough for the two icons and the even gaps around them."""
-        h = 2 * self.ICON + 3 * self.GAP
+        just big enough for the two icons and the even gaps around them, plus 2 px more on top."""
+        h = 2 * self.ICON + 3 * self.GAP + 2
         return QRectF(0.5, self.height() - h + 0.5, self.TAB + self.TUCK, h - 1)
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(QColor(LINE), 1))
+        p.setPen(QPen(QColor(EDGE), 1))
         tab_bg = QColor(BG_GRID).darker(118)  # the tab first, a shade darker, so the panel sits in front of it
         tab_bg.setAlpha(245)
         p.setBrush(tab_bg)
@@ -1579,11 +1601,11 @@ class Overlay(QWidget):
         p.setOpacity(1.0 if self._hover_btn == "main" else 0.8)
         pen = QPen(QColor(ACCENT) if self.main_open else QColor(TEXT_DIM), 1.3)
         pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
+        pen.setJoinStyle(Qt.MiterJoin)  # square corners
         p.setPen(pen)
         m = c["main"]
         h, o = self.ICON / 2, self.ICON * 0.3  # both icons fill the same ICON-sized square; o: window offset
-        p.drawRoundedRect(QRectF(m.x() - h + o, m.y() - h + o, self.ICON - o, self.ICON - o), 1.5, 1.5)  # front window
+        p.drawRect(QRectF(m.x() - h + o, m.y() - h + o, self.ICON - o, self.ICON - o))  # front window
         p.drawPolyline([QPointF(m.x() - h, m.y() + h - o), QPointF(m.x() - h, m.y() - h),
                         QPointF(m.x() + h - o, m.y() - h)])  # back window, peeking out top-left
         # X: quit Fuse Box (half strength until hovered, like a label chip's ✕)
@@ -1819,10 +1841,40 @@ class TagStateBox(QPushButton):
         self.setFixedHeight(16)  # same box as the layer-shortcut key ("None")
 
 
+class SceneState(QFrame):
+    """[HOLD] [ON] [OFF] for one scene, the current one gold, like a node-label chip.
+    HOLD parks the scene: no nodes change, and its shortcut and overlay row do nothing until ON / OFF is picked;
+    ON / OFF switch the scene's nodes."""
+    picked = Signal(object)  # None (HOLD), True (ON) or False (OFF)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("scenestate")
+        self.setFixedHeight(22)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(2)
+        self.boxes = {}
+        for state, word, tip in ((None, "HOLD", "HOLD: leave the nodes as they are — the scene's shortcut and\noverlay row do nothing until you pick ON or OFF"),
+                                 (True, "ON", "Switch this scene's nodes ON"),
+                                 (False, "OFF", "Switch this scene's nodes OFF")):
+            b = TagStateBox(word, False, False, tip)
+            b.clicked.connect(lambda _=False, s=state: self.picked.emit(s))
+            h.addWidget(b)
+            self.boxes[state] = b
+
+    def set_state(self, on, configured: bool):
+        self.setEnabled(configured)
+        for state, b in self.boxes.items():
+            b.setProperty("sel", configured and on is state)
+            repolish(b)
+
+
 class TagChip(QFrame):
-    """Name · [ON] [OFF] · ✕.  Grey = ARMED (state unknown), the chosen box gold;
+    """Name · [ON] [OFF] · ✕.  Grey = HOLD (state unknown), the chosen box gold;
     the other box red when a scene in this preset picks these nodes with the opposite state.
-    Click the name: back to ARMED (no nodes change). Right-click: favourite (every project) / this project only."""
+    Click the name: back to HOLD (no nodes change). Right-click: favourite (every project) / this project only."""
     picked = Signal(int, bool)
     disarmed = Signal(int)
     scoped = Signal(int)
@@ -1857,11 +1909,11 @@ class TagChip(QFrame):
         b_on.clicked.connect(lambda: self.picked.emit(index, True))
         b_off.clicked.connect(lambda: self.picked.emit(index, False))
         b_x.clicked.connect(lambda: self.removed.emit(index))
-        state = "ARMED — state unknown, pick ON or OFF" if armed else ("ON" if on else "OFF")
+        state = "HOLD — nodes left as they are, pick ON or OFF" if armed else ("ON" if on else "OFF")
         scope = "favourite (every project on this machine)" if tag["scope"] == "F" else "this project only"
         self.setToolTip(f"Every node labelled “{n}” in Resolve (any case): all layers, groups and the "
                         f"timeline, on every enabled clip.\nNow: {state} · {scope} (right-click to change)\n"
-                        "Click the name to set it back to ARMED (no nodes change).\n"
+                        "Click the name to set it back to HOLD (no nodes change).\n"
                         "While OFF, layer keys and “Entire layer” picks leave these nodes off when they switch "
                         "a layer back on."
                         + ("\n\nRed: a scene in this preset uses these nodes with the opposite ON/OFF." if clash else ""))
@@ -2046,6 +2098,25 @@ class FlowHolder(QWidget):
             self.updateGeometry()
 
 
+class GridFrame(QFrame):
+    """The grid's box, outlined at exactly one device pixel: at fractional display scaling a style-sheet
+    border can land between pixel rows and blur to two."""
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        dpr = self.devicePixelRatioF()
+        p.scale(1 / dpr, 1 / dpr)  # paint in device pixels
+        o = self.mapTo(self.window(), QPoint())
+        ox, oy = o.x() * dpr, o.y() * dpr  # may fall between the window's device pixels
+        x0, y0 = math.ceil(ox), math.ceil(oy)  # outermost whole pixels inside the frame
+        x1, y1 = math.floor(ox + self.width() * dpr) - 1, math.floor(oy + self.height() * dpr) - 1
+        c = QColor(EDGE)
+        for x, y, w, h in ((x0 + 1, y0, x1 - x0 - 1, 1), (x0 + 1, y1, x1 - x0 - 1, 1),  # top, bottom
+                           (x0, y0 + 1, 1, y1 - y0 - 1), (x1, y0 + 1, 1, y1 - y0 - 1)):  # left, right; corners left open
+            p.fillRect(QRectF(x - ox, y - oy, w, h), c)
+
+
 class PinButton(QPushButton):
     """Pin on top: gold pin when the window stays above Resolve, grey when not."""
 
@@ -2125,8 +2196,13 @@ class LayerPill(QFrame):
         self.hk.setObjectName("pillkey")
         self.hk.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.hk.setFixedHeight(16)
-        for w in (self.dot, self.name, self.one, self.hk):
+        key = QHBoxLayout()
+        key.setSpacing(2)  # the ✕ sits close to its key, like in a node-label chip
+        key.addWidget(self.hk)
+        key.addWidget(self.hk.clear)
+        for w in (self.dot, self.name, self.one):
             h.addWidget(w)
+        h.addLayout(key)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(lambda pos: self.menu.emit(self.key, self.mapToGlobal(pos)))
 
@@ -2148,8 +2224,9 @@ class LayerPill(QFrame):
 
 # Resolve's UI face is Open Sans; Noto Sans is the same design and is more often installed with all weights
 FONT = '"Noto Sans", "Open Sans", "Segoe UI", "Helvetica Neue", "DejaVu Sans", Arial'
-CHIP_FONT = f'"Inter", {FONT}'  # ON / OFF / ARMED: Inter SemiBold sits between Noto's Regular and Bold
+CHIP_FONT = f'"Inter", {FONT}'  # ON / OFF / HOLD: Inter SemiBold sits between Noto's Regular and Bold
 MONO = 'Consolas, Menlo, "DejaVu Sans Mono", monospace'
+SCENE_BARS = "\n".join(f'QLineEdit#colname[scene="{i}"] {{ border-top-color: {c}; }}' for i, c in enumerate(SCENE_COLORS))
 STYLE = f"""
 * {{ font-family: {FONT}; font-size: 9pt; color: {TEXT}; }}
 QMainWindow, QWidget#root {{ background: {BG}; }}
@@ -2160,11 +2237,12 @@ QLabel#rowlabel {{ color: {TEXT_DIM}; padding-right: 8px; }}
 QLabel#rowlabel[layer="true"] {{ color: {TEXT}; }}
 QLabel#one {{ font-size: 7pt; color: {TEXT_DIM}; border: 1px solid {BTN}; border-radius: 2px; padding: 0 3px;
     min-height: 12px; max-height: 12px; }}
-QFrame#grid {{ background: {BG_GRID}; border: 1px solid {LINE}; border-radius: 2px; }}
-QFrame#sep {{ background: {LINE}; max-height: 1px; min-height: 1px; }}
+QFrame#grid {{ background: {BG_GRID}; border: none; border-radius: 2px; }}
+QFrame#sep {{ background: {EDGE}; max-height: 1px; min-height: 1px; margin: 5px 0; }}
 QLineEdit#colname {{ background: {BG_DARK}; border: 1px solid transparent; border-top: 2px solid {GREEN};
     border-radius: 0; padding: 7px 8px 3px 8px; color: {TEXT}; font-size: 9pt; }}
 QLineEdit#colname:hover {{ border-left-color: {BTN}; border-right-color: {BTN}; border-bottom-color: {BTN}; }}
+{SCENE_BARS}
 QLineEdit#colname:focus {{ border-left-color: transparent; border-right-color: transparent;
     border-bottom-color: transparent; background: {FIELD}; color: {TEXT_BRIGHT}; }}
 QPushButton {{ background: {BTN}; border: 1px solid {LINE}; border-radius: 3px; padding: 4px 10px; color: {TEXT}; }}
@@ -2181,23 +2259,14 @@ QPushButton#cell[empty="true"] {{ color: {TEXT_FAINT}; }}
 QPushButton#cell[all="true"] {{ color: {ACCENT}; }}
 QPushButton#cell[missing="true"] {{ color: #8a7a5c; font-style: italic; }}
 QPushButton#cell[kind="hotkey"] {{ font-family: {MONO}; }}
-QPushButton#cell[recording="true"] {{ border-color: {BLUE}; color: {TEXT_BRIGHT}; }}
+QPushButton#cell[recording="true"] {{ color: {TEXT}; }}
 QPushButton#cell[clash="true"] {{ border: 1px solid {RED}; }}
-QPushButton#state {{ font-family: {CHIP_FONT}; font-size: 8pt; font-weight: 600; padding: 0 8px; min-height: 16px; max-height: 16px;
-    border: 1px solid {LINE}; border-radius: 2px; }}
-QPushButton#state[state="on"] {{ background: {ACCENT}; color: {LINE}; }}
-QPushButton#state[state="off"] {{ background: {BTN}; color: {TEXT_DIM}; }}
-QPushButton#state[state="idle"] {{ background: {BG_DARK}; color: {TEXT_FAINT}; }}
-QPushButton#state[state="armed"] {{ background: {BTN}; color: {ACCENT}; }}
-QPushButton#state[state="armed"]:hover {{ background: {BTN_HOVER}; }}
-QPushButton#state[state="on"]:hover {{ background: #d4a22a; }}
-QPushButton#state[state="off"]:hover {{ background: {BTN_HOVER}; color: {TEXT}; }}
 QFrame#pill {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px; }}
 QLabel#pillname {{ color: {TEXT_FAINT}; }}
 QLabel#pillname[on="true"] {{ color: {TEXT}; }}
 QPushButton#pillkey {{ background: {BTN}; border: 1px solid transparent; border-radius: 2px; padding: 0 6px;
     font-family: {MONO}; font-size: 8pt; color: {TEXT_DIM}; min-height: 14px; }}
-QPushButton#pillkey[recording="true"] {{ border-color: {BLUE}; color: {TEXT_BRIGHT}; }}
+QPushButton#pillkey[recording="true"] {{ color: {TEXT}; }}
 QPushButton#pillkey[clash="true"] {{ border-color: {RED}; }}
 QFrame#tagfield {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px; }}
 QFrame#tag {{ background: {BG_DARK}; border: 1px solid {BTN}; border-radius: 3px; }}
@@ -2209,6 +2278,7 @@ QPushButton#tagstate {{ background: {BTN}; border: 1px solid transparent; border
 QPushButton#tagstate:hover {{ color: {TEXT}; }}
 QPushButton#tagstate[clash="true"] {{ background: #5e2421; color: {RED}; }}
 QPushButton#tagstate[sel="true"] {{ background: {ACCENT}; color: {LINE}; }}
+QPushButton#tagstate:disabled {{ color: {TEXT_FAINT}; }}
 QLineEdit#tagedit {{ background: transparent; border: none; padding: 0 7px 0 8px; color: {TEXT}; }}
 QPushButton#pin {{ padding: 0; }}
 QPushButton#seg {{ padding: 3px 0; min-width: 24px; max-width: 24px; }}
@@ -2338,7 +2408,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget(objectName="root")
         v = QVBoxLayout(root)
-        v.setContentsMargins(14, 10, 14, 10)
+        v.setContentsMargins(8, 10, 8, 10)  # the grid box's left line under the title's first letter
         v.setSpacing(8)
 
         # header: refresh · clean plate · pin · overlay
@@ -2372,7 +2442,7 @@ class MainWindow(QMainWindow):
         v.addLayout(h)
 
         # grid
-        self.grid_frame = QFrame(objectName="grid")
+        self.grid_frame = GridFrame(objectName="grid")
         self.grid = QGridLayout(self.grid_frame)
         self.grid.setContentsMargins(10, 8, 10, 10)
         self.grid.setHorizontalSpacing(6)
@@ -2390,6 +2460,7 @@ class MainWindow(QMainWindow):
         for i, t in enumerate(self.cfg["toggles"]):
             ne = SceneNameEdit(t["name"])
             ne.setObjectName("colname")
+            ne.setProperty("scene", str(i % len(SCENE_COLORS)))
             ne.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)  # in line with the node names below
             ne.setMaxLength(24)
             ne.setToolTip("Scene name — click to rename\nEnter: confirm, next name · Shift+Enter: confirm, previous name · Esc: cancel")
@@ -2401,13 +2472,10 @@ class MainWindow(QMainWindow):
             hb.set_hotkey(t.get("hotkey"))
             hb.changed.connect(lambda hk, i=i: self._set_hotkey(i, hk))
             self.hotkey_btns.append(hb)
-            sb = QPushButton(objectName="state")
-            sb.setMinimumWidth(44)  # ON / OFF / — all the same width
-            sb.setCursor(Qt.PointingHandCursor)
-            sb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            sb.setToolTip("Click to toggle · right-click for Force ON / OFF and This clip only")
+            sb = SceneState()
+            sb.setToolTip("Right-click for This clip only")
             sb.setContextMenuPolicy(Qt.CustomContextMenu)
-            sb.clicked.connect(lambda _=False, i=i: self.run_toggle(i))
+            sb.picked.connect(lambda state, i=i: self._pick_state(i, state))
             sb.customContextMenuRequested.connect(lambda pos, i=i, sb=sb: self._state_menu(i, sb.mapToGlobal(pos)))
             self.state_btns.append(sb)
             om = QLabel("1 clip", objectName="one")
@@ -2582,7 +2650,9 @@ class MainWindow(QMainWindow):
         self.grid.addWidget(temp(QFrame(objectName="sep")), r, 0, 1, NUM_TOGGLES + 1)
         r += 1
         # Node labels
-        self.grid.addWidget(label("Node Label"), r, 0, top_right)
+        tags_label = label("Node Label")
+        tags_label.setFixedHeight(34)  # centred on the first row of chips (field border + margin + half a chip)
+        self.grid.addWidget(tags_label, r, 0, top_right)
         self.grid.addWidget(self.tags_field, r, 1, 1, NUM_TOGGLES)
         self._refresh_tags()
         self._mark_clashes()
@@ -2730,13 +2800,7 @@ class MainWindow(QMainWindow):
     def refresh_states(self):
         for i, t in enumerate(self.cfg["toggles"]):
             configured = has_selection(t)
-            st = ("armed" if t["on"] is None else "on" if t["on"] else "off") if configured else "idle"
-            word = {"on": "ON", "off": "OFF", "armed": "ARMED", "idle": "—"}[st]
-            sb = self.state_btns[i]
-            sb.setProperty("state", st)
-            sb.setText(word)
-            sb.setEnabled(configured)
-            repolish(sb)
+            self.state_btns[i].set_state(t["on"], configured)
             self.one_marks[i].setVisible(bool(t.get("one_clip")))
         for key, pill in self.pills.items():
             lk = self.cfg["layer_keys"].get(key, {})
@@ -2754,10 +2818,10 @@ class MainWindow(QMainWindow):
         return [t for t in self.cfg["tags"] if t["scope"] == "F" or t.get("project") == pk]
 
     def _label_clashes(self) -> set[str]:
-        """Node Labels whose ON/OFF disagrees with a scene (not ARMED) that picks a node with that label."""
+        """Node Labels whose ON/OFF disagrees with a scene (not HOLD) that picks a node with that label."""
         out = set()
         for tag in self._visible_tags():
-            if tag["on"] is None:  # ARMED: nothing to compare yet
+            if tag["on"] is None:  # HOLD: nothing to compare yet
                 continue
             name = tag["name"].lower()
             for t in self.cfg["toggles"]:
@@ -2788,7 +2852,7 @@ class MainWindow(QMainWindow):
         if any(t["name"].lower() == name.lower() for t in self._visible_tags()):
             self.flash(f"“{name}” is already in Node Label")
         else:
-            tag = {"name": name, "on": None, "scope": "P", "project": self._proj_key or "_"}  # ARMED
+            tag = {"name": name, "on": None, "scope": "P", "project": self._proj_key or "_"}  # HOLD
             self.cfg["tags"].append(tag)
             self._sync_labels([tag], quiet_found=True, keep_state=True)
             self.save()
@@ -2797,7 +2861,7 @@ class MainWindow(QMainWindow):
 
     def _sync_labels(self, tags: list[dict], quiet_found=False, keep_state=False):
         """Set label chips to the real state of those nodes on the open clip (and timeline).
-        ARMED labels (and keep_state) only get checked for existence — they stay grey until ON / OFF is picked."""
+        HOLD labels (and keep_state) only get checked for existence — they stay grey until ON / OFF is picked."""
         if not tags or self._busy or self.bridge.resolve is None:
             return
         try:
@@ -2943,12 +3007,18 @@ class MainWindow(QMainWindow):
         self.refresh_states()
         self._refresh_tags()
 
+    def _pick_state(self, i: int, state: bool | None):
+        if state is not None:
+            self.run_toggle(i, state)
+        elif self.cfg["toggles"][i]["on"] is not None:
+            self.cfg["toggles"][i]["on"] = None
+            self.save()
+            self.refresh_states()
+            self._refresh_tags()
+
     def _state_menu(self, i: int, gpos):
         t = self.cfg["toggles"][i]
         m = QMenu(self)
-        m.addAction("Force ON", lambda: self.run_toggle(i, True))
-        m.addAction("Force OFF", lambda: self.run_toggle(i, False))
-        m.addSeparator()
         a = m.addAction("This clip only")
         a.setCheckable(True)
         a.setChecked(bool(t.get("one_clip")))
@@ -3006,8 +3076,24 @@ class MainWindow(QMainWindow):
             c = QColor(BORDER)
             edge = ctypes.c_uint(c.red() | c.green() << 8 | c.blue() << 16)  # COLORREF is 0x00BBGGRR
             dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(edge), 4)  # DWMWA_BORDER_COLOR; Windows 10 ignores it
-            no_icon = (ctypes.c_uint * 2)(0x2, 0x2)  # WTA_OPTIONS: WTNCA_NODRAWICON (the taskbar keeps its icon)
-            ctypes.windll.uxtheme.SetWindowThemeAttribute(hwnd, 1, no_icon, ctypes.sizeof(no_icon))  # WTA_NONCLIENT
+            t = QColor(TITLE_TEXT)
+            text = ctypes.c_uint(t.red() | t.green() << 8 | t.blue() << 16)
+            dwm.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(text), 4)  # DWMWA_TEXT_COLOR; Windows 10 ignores it
+            # WTA_OPTIONS: WTNCA_NOSYSMENU — no system menu, but the icon slot stays (Windows strips leading
+            # spaces, so this is what insets the title): a faint circle in it, a shade lighter than the bar
+            no_menu = (ctypes.c_uint * 2)(0x4, 0x6)
+            ctypes.windll.uxtheme.SetWindowThemeAttribute(hwnd, 1, no_menu, ctypes.sizeof(no_menu))  # WTA_NONCLIENT
+            dot = QImage(32, 32, QImage.Format_ARGB32)
+            dot.fill(Qt.transparent)
+            p = QPainter(dot)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(TITLE_BG).lighter(135))
+            p.drawEllipse(QRectF(7, 7, 18, 18))
+            p.end()
+            u32 = ctypes.windll.user32
+            u32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p]
+            u32.SendMessageW(hwnd, 0x80, 0, int(dot.toHICON()))  # WM_SETICON, ICON_SMALL: the taskbar keeps the big icon
         self.setWindowOpacity(0.0)
         self.show()
         QTimer.singleShot(160, lambda: self.setWindowOpacity(1.0))
@@ -3318,7 +3404,10 @@ class MainWindow(QMainWindow):
         if not has_selection(t):
             self.flash(f"{t['name']} has no nodes selected")
             return
-        new_state = (t["on"] is False) if state is None else state  # ON → OFF, OFF → ON, ARMED → OFF
+        if state is None and t["on"] is None:  # HOLD: the shortcut and overlay leave the nodes alone
+            self.flash(f"{t['name']} is on HOLD — pick ON or OFF to use it")
+            return
+        new_state = (t["on"] is False) if state is None else state  # ON → OFF, OFF → ON
         word = "ON" if new_state else "OFF"
         cache = {}
 
@@ -3374,7 +3463,7 @@ class MainWindow(QMainWindow):
 
     def run_label(self, tag: dict, state: bool | None = None):
         """Switch every node with this label ON / OFF: all layers, groups and the timeline, every enabled clip.
-        state None = flip (ARMED → OFF)."""
+        state None = flip (HOLD → OFF)."""
         new_state = (tag["on"] is False) if state is None else state
         word = "ON" if new_state else "OFF"
         sel = [{"label": tag["name"], "ci": True}]
