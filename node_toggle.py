@@ -88,7 +88,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Fuse Box"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.0 r21"
 NUM_TOGGLES = 5
 NUM_PRESETS = 3
 MAX_LAYERS = 16
@@ -561,7 +561,9 @@ def _humanize_action(name: str) -> str:
     return base.strip().capitalize() or name
 
 
-SHORTCUTS_DIR = Path(__file__).resolve().parent / "shortcuts"  # saved copies of Resolve's custom presets
+# saved copies of Resolve's custom presets: next to the script, or in the settings folder for a packaged app
+SHORTCUTS_DIR = (config_path(False).parent if getattr(sys, "frozen", False)
+                 else Path(__file__).resolve().parent) / "shortcuts"
 
 
 class ResolveShortcuts:
@@ -815,6 +817,8 @@ AUTOSTART_NAME = "Fuse Box"
 
 
 def _launch_cmd(*extra) -> list[str]:
+    if getattr(sys, "frozen", False):  # a packaged app (PyInstaller): the executable is the app
+        return [sys.executable, *extra]
     exe = Path(sys.executable)
     if IS_WIN and exe.name.lower() == "python.exe" and exe.with_name("pythonw.exe").exists():
         exe = exe.with_name("pythonw.exe")
