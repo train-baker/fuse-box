@@ -2367,6 +2367,11 @@ class MainWindow(QMainWindow):
         else:
             geo = QApplication.primaryScreen().availableGeometry()
             self.overlay.move(geo.right() - self.overlay.width() - 24, geo.top() + 80)
+        if IS_WIN:  # the overlay floats over Resolve only: any other focused app comes in front of it
+            self._overlay_on_top = None
+            self._layer_timer = QTimer(self, interval=250)
+            self._layer_timer.timeout.connect(self._overlay_layer)
+            self._layer_timer.start()
 
         self.hotkeys = HotkeyEngine()
         self.hotkeys.fired.connect(self.on_hotkey)
@@ -3137,6 +3142,24 @@ class MainWindow(QMainWindow):
             import ctypes
             ctypes.windll.user32.SetWindowPos(int(self.winId()), -1 if on else -2, 0, 0, 0, 0,
                                               0x0001 | 0x0002 | 0x0010)  # TOPMOST/NOTOPMOST, keep size/pos/focus
+
+    def _overlay_layer(self):
+        """Windows: topmost while Resolve (or Fuse Box) is the focused app; otherwise tucked in just behind
+        whatever app has focus, so it stays over Resolve but under everything you switch to."""
+        if not self.overlay.isVisible():
+            self._overlay_on_top = None  # showing it again (Qt makes it topmost): re-check
+            return
+        on_top = _foreground_ok()
+        if on_top == self._overlay_on_top:
+            return
+        import ctypes
+        u32 = ctypes.WinDLL("user32")  # own copy: the prototypes below don't leak into other ctypes calls
+        u32.GetForegroundWindow.restype = ctypes.c_void_p
+        u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_int] * 4 + [ctypes.c_uint]
+        # placed after a non-topmost window, a topmost one loses its topmost status
+        after = ctypes.c_void_p(-1) if on_top else u32.GetForegroundWindow()
+        u32.SetWindowPos(int(self.overlay.winId()), after, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # keep size/pos/focus
+        self._overlay_on_top = on_top
 
     def _set_overlay_visible(self, on: bool):
         self.cfg["overlay"]["visible"] = on
