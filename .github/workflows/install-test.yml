@@ -58,12 +58,12 @@ jobs:
             cat app.log
             return $status
           }
-          if [ "$RUNNER_OS" = Linux ]; then
-            export -f run
-            xvfb-run -a bash -c run
-          else
-            run
+          if [ "$RUNNER_OS" = Linux ]; then  # a virtual screen for Qt and pynput
+            Xvfb :99 -screen 0 1920x1080x24 &
+            export DISPLAY=:99
+            sleep 2
           fi
+          run
 
       - name: Imports used at runtime
         run: |
