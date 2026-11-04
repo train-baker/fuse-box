@@ -58,16 +58,16 @@ jobs:
           mkdir -p out
           case "$RUNNER_OS" in
             Windows)
-              python -m PyInstaller "${common[@]}" --onefile --windowed --name FuseBox node_toggle.py
+              python -m PyInstaller "${common[@]}" --onefile --windowed --name FuseBox fuse_box.py
               cp dist/FuseBox.exe "out/FuseBox-$version-${{ matrix.platform }}.exe"
               echo "APP=dist/FuseBox.exe" >> "$GITHUB_ENV" ;;
             macOS)
               python -m PyInstaller "${common[@]}" --windowed --name "Fuse Box" \
-                --osx-bundle-identifier com.fusebox.app node_toggle.py
+                --osx-bundle-identifier com.fusebox.app fuse_box.py
               ditto -c -k --keepParent "dist/Fuse Box.app" "out/FuseBox-$version-${{ matrix.platform }}.zip"
               echo "APP=dist/Fuse Box.app/Contents/MacOS/Fuse Box" >> "$GITHUB_ENV" ;;
             Linux)
-              python -m PyInstaller "${common[@]}" --onefile --name fusebox node_toggle.py
+              python -m PyInstaller "${common[@]}" --onefile --name fusebox fuse_box.py
               tar -czf "out/FuseBox-$version-${{ matrix.platform }}.tar.gz" -C dist fusebox
               echo "APP=dist/fusebox" >> "$GITHUB_ENV" ;;
           esac

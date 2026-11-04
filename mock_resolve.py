@@ -1,7 +1,7 @@
 """
-A fake DaVinci Resolve scripting object, used by `node_toggle.py --demo`.
+A fake DaVinci Resolve scripting object, used by `fuse_box.py --demo`.
 
-It mimics just the parts of the Resolve API that Node Toggle calls, so the UI
+It mimics just the parts of the Resolve API that Fuse Box calls, so the UI
 can be tried without Resolve running. Node enable/disable calls are printed
 to the console.
 """
