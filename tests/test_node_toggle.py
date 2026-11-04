@@ -51,7 +51,7 @@ def test_mac_plist_escapes_paths(tmp_path, monkeypatch):
     nt.set_autostart(True)
     data = plistlib.loads(f.read_bytes())
     assert data["ProgramArguments"] == [*cmd, "--standby"]
-    assert data["Label"] == "com.dakillswitch.standby" and data["RunAtLoad"] is True
+    assert data["Label"] == "com.fusebox.standby" and data["RunAtLoad"] is True
 
 
 @pytest.mark.skipif(not nt.IS_WIN, reason="Windows process watcher")
@@ -138,3 +138,24 @@ def test_plus_key_hotkey_matches_resolve_combo():
     from PySide6.QtCore import Qt
     resolve = nt.ResolveShortcuts._combo(int(Qt.Key_Plus) | 0x04000000)  # Ctrl + "+" as Resolve stores it
     assert nt.ResolveShortcuts.hotkey_combo({"mods": ["ctrl"], "text": "Ctrl++"}) == resolve
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.mark.parametrize("state", [True, False])
+def test_clicking_node_label_name_sets_it_back_to_armed(qapp, state):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QLabel
+    field = nt.TagsField()
+    field.set_tags([{"name": "CP-LOOK", "on": state, "scope": "P", "project": "x"}])
+    changed = []
+    field.changed.connect(lambda: changed.append(1))
+    field.show()
+    chip = field.findChild(nt.TagChip)
+    QTest.mouseClick(chip.findChild(QLabel, "tagname"), Qt.LeftButton)
+    assert field.tags[0]["on"] is None and changed == [1]

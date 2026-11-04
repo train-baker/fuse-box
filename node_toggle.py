@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DaKillswitch (formerly Node Toggle) — switch DaVinci Resolve color nodes on and off with global hotkeys.
+Fuse Box (formerly Node Toggle) — switch DaVinci Resolve color nodes on and off with global hotkeys.
 
   * 5 independent toggles (columns), each with its own shortcut
   * each toggle can hold nodes from Pre-Group, every clip layer (L1, L2, L3 …),
@@ -85,7 +85,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-APP_NAME = "DaKillswitch"
+APP_NAME = "Fuse Box"
 APP_VERSION = "0.1.4 r21"
 NUM_TOGGLES = 5
 NUM_PRESETS = 3
@@ -514,7 +514,7 @@ class ResolveBridge:
             still = tl.GrabStill() if tl and album else None
             if not still:
                 return None
-            tmp = tempfile.mkdtemp(prefix="dakillswitch_")
+            tmp = tempfile.mkdtemp(prefix="fusebox_")
             try:
                 album.ExportStills([still], tmp, "dks", "drx")
                 album.DeleteStills([still])
@@ -804,7 +804,7 @@ def read_resolve_layer_settings() -> dict | None:
 
 # ----------------------------------------------------------------------------- open with Resolve
 
-AUTOSTART_NAME = "DaKillswitch"
+AUTOSTART_NAME = "Fuse Box"
 
 
 def _launch_cmd(*extra) -> list[str]:
@@ -816,9 +816,9 @@ def _launch_cmd(*extra) -> list[str]:
 
 def _autostart_file() -> Path | None:
     if IS_MAC:
-        return Path.home() / "Library/LaunchAgents/com.dakillswitch.standby.plist"
+        return Path.home() / "Library/LaunchAgents/com.fusebox.standby.plist"
     if not IS_WIN:
-        return Path.home() / ".config/autostart/dakillswitch.desktop"
+        return Path.home() / ".config/autostart/fuse-box.desktop"
     return None
 
 
@@ -835,7 +835,7 @@ def autostart_enabled() -> bool:
 
 
 def set_autostart(on: bool):
-    """Start DaKillswitch in standby at login (Windows Run key, macOS LaunchAgent, Linux autostart)."""
+    """Start Fuse Box in standby at login (Windows Run key, macOS LaunchAgent, Linux autostart)."""
     cmd = _launch_cmd("--standby")
     if IS_WIN:
         import winreg
@@ -853,7 +853,7 @@ def set_autostart(on: bool):
         return
     f.parent.mkdir(parents=True, exist_ok=True)
     if IS_MAC:
-        f.write_bytes(plistlib.dumps({"Label": "com.dakillswitch.standby", "ProgramArguments": cmd,
+        f.write_bytes(plistlib.dumps({"Label": "com.fusebox.standby", "ProgramArguments": cmd,
                                       "RunAtLoad": True}))
     else:
         f.write_text(f"[Desktop Entry]\nType=Application\nName={APP_NAME}\nExec={shlex.join(cmd)}\n"
@@ -1475,7 +1475,7 @@ class NodePicker(QPushButton):
 
 class Overlay(QWidget):
     """Frameless always-on-top status panel. Drag to move, click a row to toggle. The icons in the
-    left column: window = show / hide the main window (gold while it's open), X = quit DaKillswitch."""
+    left column: window = show / hide the main window (gold while it's open), X = quit Fuse Box."""
     row_clicked = Signal(int)
     open_main = Signal()
     close_main = Signal()
@@ -1492,7 +1492,7 @@ class Overlay(QWidget):
     KEY_H, KEY_R, NAME_GAP = 14, 12, 8  # key blocks: height, gap to the right edge; gap between name and keys
     LEFT = TAB + PAD            # rows start here (panel edge + padding)
     OUTER_R = 5                 # panel and tab share one corner radius; scene fields (3 px) nest inside it
-    TIPS = {"main": "Show / hide the DaKillswitch window", "quit": "Quit DaKillswitch"}
+    TIPS = {"main": "Show / hide the Fuse Box window", "quit": "Quit Fuse Box"}
 
     def __init__(self):
         flags = Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus
@@ -1586,7 +1586,7 @@ class Overlay(QWidget):
         p.drawRoundedRect(QRectF(m.x() - h + o, m.y() - h + o, self.ICON - o, self.ICON - o), 1.5, 1.5)  # front window
         p.drawPolyline([QPointF(m.x() - h, m.y() + h - o), QPointF(m.x() - h, m.y() - h),
                         QPointF(m.x() + h - o, m.y() - h)])  # back window, peeking out top-left
-        # X: quit DaKillswitch (half strength until hovered, like a label chip's ✕)
+        # X: quit Fuse Box (half strength until hovered, like a label chip's ✕)
         p.setOpacity(1.0 if self._hover_btn == "quit" else 0.5)
         pen.setColor(ICON_GREY)
         pen.setWidthF(1.2)
@@ -1822,8 +1822,9 @@ class TagStateBox(QPushButton):
 class TagChip(QFrame):
     """Name · [ON] [OFF] · ✕.  Grey = ARMED (state unknown), the chosen box gold;
     the other box red when a scene in this preset picks these nodes with the opposite state.
-    Right-click: favourite (every project) / this project only."""
+    Click the name: back to ARMED (no nodes change). Right-click: favourite (every project) / this project only."""
     picked = Signal(int, bool)
+    disarmed = Signal(int)
     scoped = Signal(int)
     removed = Signal(int)
 
@@ -1840,9 +1841,10 @@ class TagChip(QFrame):
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 0, 5, 0)
         h.setSpacing(2)
-        name = QLabel(tag["name"], objectName="tagname")
-        name.setProperty("armed", armed)
-        h.addWidget(name)
+        self.name = QLabel(tag["name"], objectName="tagname")
+        self.name.setProperty("armed", armed)
+        self.name.setCursor(Qt.PointingHandCursor)
+        h.addWidget(self.name)
         h.addSpacing(5)
         n = tag["name"]
         b_on = TagStateBox("ON", on is True, clash, f"Switch every “{n}” node ON")
@@ -1859,9 +1861,17 @@ class TagChip(QFrame):
         scope = "favourite (every project on this machine)" if tag["scope"] == "F" else "this project only"
         self.setToolTip(f"Every node labelled “{n}” in Resolve (any case): all layers, groups and the "
                         f"timeline, on every enabled clip.\nNow: {state} · {scope} (right-click to change)\n"
+                        "Click the name to set it back to ARMED (no nodes change).\n"
                         "While OFF, layer keys and “Entire layer” picks leave these nodes off when they switch "
                         "a layer back on."
                         + ("\n\nRed: a scene in this preset uses these nodes with the opposite ON/OFF." if clash else ""))
+
+    def mousePressEvent(self, e):  # the name label passes clicks up; accept so the release comes here too
+        e.setAccepted(e.button() == Qt.LeftButton)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.name.geometry().contains(e.position().toPoint()):
+            self.disarmed.emit(self.index)
 
     def contextMenuEvent(self, e):
         m = QMenu(self)
@@ -1939,6 +1949,7 @@ class TagsField(QFrame):
         for i, t in enumerate(self.tags):
             c = TagChip(i, t, self, clash=t["name"].lower() in self.clash)
             c.picked.connect(self._pick)
+            c.disarmed.connect(self._disarm)
             c.scoped.connect(self._scope)
             c.removed.connect(self._remove)
             self.flow.addWidget(c)
@@ -1975,6 +1986,11 @@ class TagsField(QFrame):
     def _pick(self, i, state):
         if self.set_label:
             self.set_label(self.tags[i], state)
+
+    def _disarm(self, i):
+        if self.tags[i]["on"] is not None:
+            self.tags[i]["on"] = None
+            self.changed.emit()
 
     def _scope(self, i):
         self.tags[i]["scope"] = "P" if self.tags[i]["scope"] == "F" else "F"
@@ -2185,7 +2201,7 @@ QPushButton#pillkey[recording="true"] {{ border-color: {BLUE}; color: {TEXT_BRIG
 QPushButton#pillkey[clash="true"] {{ border-color: {RED}; }}
 QFrame#tagfield {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px; }}
 QFrame#tag {{ background: {BG_DARK}; border: 1px solid {BTN}; border-radius: 3px; }}
-QFrame#tag[armed="true"] {{ background: transparent; border: 1px dashed {BTN_HOVER}; }}
+QFrame#tag[armed="true"] {{ background: transparent; border: 1px solid {BTN_HOVER}; }}
 QLabel#tagname {{ color: {TEXT}; }}
 QLabel#tagname[armed="true"] {{ color: {TEXT_FAINT}; }}
 QPushButton#tagstate {{ background: {BTN}; border: 1px solid transparent; border-radius: 2px; padding: 0 6px;
@@ -2540,12 +2556,12 @@ class MainWindow(QMainWindow):
             self.grid.addWidget(holder, r, i + 1)
         r += 1
         # Scene shortcut
-        self.grid.addWidget(label("Scene shortcut"), r, 0)
+        self.grid.addWidget(label("Scene Shortcut"), r, 0)
         for i in range(NUM_TOGGLES):
             self.grid.addWidget(self.hotkey_btns[i], r, i + 1)
         r += 1
         # Layer shortcut
-        self.grid.addWidget(label("Layer shortcut"), r, 0, top_right)
+        self.grid.addWidget(label("Layer Shortcut"), r, 0, top_right)
         holder = temp(FlowHolder())
         flow = holder.flow
         for key in self._slot_order():
@@ -2990,6 +3006,8 @@ class MainWindow(QMainWindow):
             c = QColor(BORDER)
             edge = ctypes.c_uint(c.red() | c.green() << 8 | c.blue() << 16)  # COLORREF is 0x00BBGGRR
             dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(edge), 4)  # DWMWA_BORDER_COLOR; Windows 10 ignores it
+            no_icon = (ctypes.c_uint * 2)(0x2, 0x2)  # WTA_OPTIONS: WTNCA_NODRAWICON (the taskbar keeps its icon)
+            ctypes.windll.uxtheme.SetWindowThemeAttribute(hwnd, 1, no_icon, ctypes.sizeof(no_icon))  # WTA_NONCLIENT
         self.setWindowOpacity(0.0)
         self.show()
         QTimer.singleShot(160, lambda: self.setWindowOpacity(1.0))
@@ -3143,7 +3161,7 @@ class MainWindow(QMainWindow):
         self.refresh_states()
 
     def quit_all(self):
-        """Overlay power button: close the main window and the overlay (quits DaKillswitch)."""
+        """Overlay power button: close the main window and the overlay (quits Fuse Box)."""
         self._quitting = True
         self.close()
         QApplication.quit()

@@ -1,5 +1,5 @@
 [project]
-name = "dakillswitch"
+name = "fuse-box"
 version = "0.1.4"
 description = "Switch DaVinci Resolve color nodes on and off with global hotkeys"
 requires-python = ">=3.10"
