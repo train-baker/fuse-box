@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+from collections import deque
 import json
 import math
 import os
@@ -50,7 +51,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -62,6 +63,7 @@ from PySide6.QtGui import (
     QImage,
     QKeySequence,
     QPainter,
+    QPainterPath,
     QPalette,
     QPen,
     QPixmap,
@@ -709,51 +711,49 @@ class ResolveShortcuts:
 
 # ----------------------------------------------------------------------------- layer names
 
-_LAYER_PS = r"""
+# Project Settings is a direct child of Resolve's main window (class UiProjectSettingsWidgetImp). Both readers
+# list only Resolve's windows and their direct children to find it, then read inside it alone: searching the
+# whole interface makes Resolve answer UI Automation widget by widget on its own UI thread (2 s for one pass).
+_FIND_SETTINGS_PS = r"""
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 $A=[System.Windows.Automation.AutomationElement]; $S=[System.Windows.Automation.TreeScope]
-$p = Get-Process Resolve -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $p) { exit }
-$pc = New-Object System.Windows.Automation.PropertyCondition($A::ProcessIdProperty, $p.Id)
-$all = $A::RootElement.FindAll($S::Descendants, $pc)
-$want = 0
-foreach ($e in $all) {
-  $c = $e.Current
-  if ($c.ClassName -eq 'QLabel' -and $c.Name -eq 'Node Stack Layers') { 'OPEN' }
-  elseif ($c.ClassName -eq 'QLabel' -and $c.Name -match '^Layer (\d+)$') { $want = [int]$Matches[1] }
-  elseif ($want -and $c.ClassName -eq 'UiPlainLineEdit') {
-    'LAYER ' + $want + '|' + $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value; $want = 0 }
-  elseif ($c.ClassName -eq 'QCheckBox' -and $c.Name -eq 'Post Group Node Stack Layer') {
-    'POST ' + $e.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState }
-}
+$isSettings = New-Object System.Windows.Automation.PropertyCondition($A::ClassNameProperty, 'UiProjectSettingsWidgetImp')
+function Find-Settings($p) {
+  if ($p.MainWindowHandle -ne 0) {  # straight to the main window: no walk over every window on the desktop
+    return $A::FromHandle($p.MainWindowHandle).FindFirst($S::Children, $isSettings) }
+  $pc = New-Object System.Windows.Automation.PropertyCondition($A::ProcessIdProperty, $p.Id)
+  foreach ($t in $A::RootElement.FindAll($S::Children, $pc)) {  # no main window handle: look through all of them
+    if ($t.Current.ClassName -eq 'UiProjectSettingsWidgetImp') { return $t }
+    $w = $t.FindFirst($S::Children, $isSettings)
+    if ($w) { return $w } }
+  return $null }
+function Read-Layers($w) {
+  $out = ''; $want = 0
+  foreach ($e in $w.FindAll($S::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) { $c = $e.Current
+    if ($c.ClassName -eq 'QLabel' -and $c.Name -match '^Layer (\d+)$') { $want = [int]$Matches[1] }
+    elseif ($want -and $c.ClassName -eq 'UiPlainLineEdit') {
+      $out += 'LAYER ' + $want + '|' + $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value + "`n"; $want = 0 }
+    elseif ($c.ClassName -eq 'QCheckBox' -and $c.Name -eq 'Post Group Node Stack Layer') {
+      $out += 'POST ' + $e.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState + "`n" } }
+  return $out }
 """
 
+_LAYER_PS = _FIND_SETTINGS_PS + r"""
+$p = Get-Process Resolve -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $p) { exit }
+$w = Find-Settings $p
+if ($w) { 'OPEN'; (Read-Layers $w).TrimEnd() }
+"""
 
-_LAYER_WATCH_PS = r"""
-$ErrorActionPreference = 'SilentlyContinue'
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$A=[System.Windows.Automation.AutomationElement]; $S=[System.Windows.Automation.TreeScope]
+_LAYER_WATCH_PS = "$ErrorActionPreference = 'SilentlyContinue'\n" + _FIND_SETTINGS_PS + r"""
 $parent = __PARENT__; $last = ''
-$isLbl = New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'Node Stack Layers')
 while (Get-Process -Id $parent) {
   $p = Get-Process Resolve | Select-Object -First 1
-  $out = ''
-  if ($p) {
-    $pc = New-Object System.Windows.Automation.PropertyCondition($A::ProcessIdProperty, $p.Id)
-    $w = $null
-    foreach ($t in $A::RootElement.FindAll($S::Children, $pc)) { if ($t.FindFirst($S::Descendants, $isLbl)) { $w = $t; break } }
-    if ($w) {
-      $all = $w.FindAll($S::Descendants, [System.Windows.Automation.Condition]::TrueCondition); $want = 0
-      foreach ($e in $all) { $c = $e.Current
-        if ($c.ClassName -eq 'QLabel' -and $c.Name -match '^Layer (\d+)$') { $want = [int]$Matches[1] }
-        elseif ($want -and $c.ClassName -eq 'UiPlainLineEdit') {
-          $out += 'LAYER ' + $want + '|' + $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value + "`n"; $want = 0 }
-        elseif ($c.ClassName -eq 'QCheckBox' -and $c.Name -eq 'Post Group Node Stack Layer') {
-          $out += 'POST ' + $e.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState + "`n" } }
-    }
-  }
+  $out = ''; $w = $null
+  if ($p) { $w = Find-Settings $p; if ($w) { $out = Read-Layers $w } }
   if ($out -and $out -ne $last) { $last = $out; [Console]::Out.Write($out + "END`n"); [Console]::Out.Flush() }
-  Start-Sleep -Milliseconds 1500
+  # open: look often, so the last rename is read before Save closes the window; closed: a cheap check each second
+  if ($w) { Start-Sleep -Milliseconds 500 } else { Start-Sleep -Milliseconds 1000 }
 }
 """
 
@@ -1518,6 +1518,7 @@ def sel_text(sel: list[dict], missing: list[dict] = ()) -> str:
 class NodePicker(QPushButton):
     """One grid cell: shows the chosen nodes, click for a multi-select dropdown."""
     changed = Signal(int, str, list)  # toggle index, slot, selection
+    menu_open = Signal(bool)  # True before the node menu opens, False once it has closed (one undo step)
 
     def __init__(self, toggle_index: int, slot: str, parent=None):
         super().__init__(parent)
@@ -1686,8 +1687,10 @@ class NodePicker(QPushButton):
         clear.triggered.connect(on_clear)
         sync_enabled()
         m.setMinimumWidth(self.width())
+        self.menu_open.emit(True)
         m.exec(self.mapToGlobal(self.rect().bottomLeft()))
         m.deleteLater()
+        self.menu_open.emit(False)
 
     def _emit(self):
         self._render()
@@ -2220,6 +2223,37 @@ class Divider(QWidget):
         p.fillRect(QRectF(0, y - oy, self.width() * dpr, 1), QColor(EDGE))
 
 
+class ArrowButton(QPushButton):
+    """Undo / Redo: a header button with a U-turn arrow instead of text (redo is undo mirrored).
+    Off, it keeps its grey box and only the arrow fades, so the header's gaps read evenly."""
+
+    def __init__(self, redo: bool, parent=None):
+        super().__init__(parent)
+        self.redo = redo
+        self.setObjectName("arrow")
+        self.setFixedWidth(26)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.translate(self.width() / 2, self.height() / 2)
+        if self.redo:
+            p.scale(-1, 1)
+        pen = QPen(QColor(TEXT if self.isEnabled() else TEXT_FAINT), 1.3)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        u = QPainterPath()  # ↶: a stroke heading left, out of a half-turn on the right
+        u.moveTo(-1.5, 5)
+        u.lineTo(1, 5)
+        u.arcTo(QRectF(-2.5, -3.5, 7, 7), 270, 180)  # bottom → round the right side → top
+        u.lineTo(-5, -3.5)
+        p.drawPath(u)
+        p.drawPolyline([QPointF(-2.5, -6), QPointF(-5, -3.5), QPointF(-2.5, -1)])  # the arrowhead
+
+
 class PinButton(QPushButton):
     """Pin on top: gold pin when the window stays above Resolve, grey when not."""
 
@@ -2336,6 +2370,7 @@ QPushButton {{ background: {BTN}; border: 1px solid transparent; border-radius: 
 QPushButton:hover {{ background: {BTN_HOVER}; }}
 QPushButton:pressed {{ background: {FIELD}; }}
 QPushButton:disabled {{ color: {TEXT_FAINT}; background: {BG_DARK}; }}
+QPushButton#arrow:disabled {{ background: {BTN}; }}
 QPushButton:checked {{ background: {BLUE}; color: {TEXT}; }}
 QPushButton[head="true"]:checked, QPushButton[head="true"]:pressed {{ background: {FIELD}; color: {ACCENT}; }}
 QPushButton#ib {{ background: transparent; border: none; padding: 0; }}
@@ -2399,6 +2434,7 @@ def make_icon() -> QIcon:
     return QIcon(pm)
 
 
+UNDO_STEPS = 8  # how far Undo / Redo of node picks reach
 WINDOW_W = 1090  # starting width: six layer-shortcut pills fit on one row
 
 
@@ -2430,6 +2466,8 @@ class MainWindow(QMainWindow):
         self._proj_key = None
         self.rkeys = ResolveShortcuts()
         self.rkeys.load()
+        self._undo, self._redo = deque(maxlen=UNDO_STEPS), deque(maxlen=UNDO_STEPS)  # node-pick snapshots
+        self._picks_before, self._menu_up = [], False
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}" + (" — demo" if demo else ""))
         self.setWindowIcon(make_icon())
@@ -2488,6 +2526,12 @@ class MainWindow(QMainWindow):
             nxt.setToolTip("Demo: move the playhead to the next clip")
             nxt.clicked.connect(self._demo_next_clip)
             h.addWidget(nxt)
+        self.btn_undo, self.btn_redo = ArrowButton(False), ArrowButton(True)
+        self.btn_undo.clicked.connect(self.undo)
+        self.btn_redo.clicked.connect(self.redo)
+        h.addWidget(self.btn_undo)
+        h.addWidget(self.btn_redo)
+        self._sync_undo()
         refresh = QPushButton("Refresh")
         refresh.setToolTip("Re-read the node tree from Resolve")
         refresh.clicked.connect(self._refresh_clicked)
@@ -2500,6 +2544,8 @@ class MainWindow(QMainWindow):
         self.btn_pin.setChecked(self.cfg.get("pinned", False))
         self.btn_pin.toggled.connect(self._set_pinned)
         h.addWidget(self.btn_pin)
+        for b in (self.btn_undo, self.btn_redo, self.btn_pin):  # icon buttons as tall as the text ones
+            b.setFixedHeight(refresh.sizeHint().height())
         for i in range(h.count()):
             if w := h.itemAt(i).widget():
                 w.setProperty("head", True)  # styled: darker with yellow text when down
@@ -2689,6 +2735,7 @@ class MainWindow(QMainWindow):
                 p = temp(NodePicker(i, row))
                 p.set_data(self._nodes.get(row), self._reasons.get(row, "Not connected"), t["sel"].get(row, []))
                 p.changed.connect(self._selection_changed)
+                p.menu_open.connect(self._pick_menu)
                 self.pickers[(i, row)] = p
                 self.grid.addWidget(p, r, i + 1)
             r += 1
@@ -2804,7 +2851,10 @@ class MainWindow(QMainWindow):
             self._layer_read_busy = False
         if not d:
             return
-        names = {k: v for k, v in d["names"].items() if v.strip()}
+        old = self.cfg["layer_names"]
+        # a field caught empty while you retype it keeps its last name (Resolve shows "Layer N" for an empty one)
+        names = {k: v.strip() or old.get(k, "") for k, v in d["names"].items()}
+        names = {k: v for k, v in names.items() if v}
         post = self.cfg["post_layer"] if d["post"] is None else d["post"]
         if names == self.cfg["layer_names"] and post == self.cfg["post_layer"]:
             return
@@ -2853,6 +2903,7 @@ class MainWindow(QMainWindow):
         return box.clickedButton() is keep
 
     def _fit_height(self):
+        QApplication.sendPostedEvents(None, QEvent.LayoutRequest)  # widgets that just changed size (a pill) first
         lay = self.centralWidget().layout()
         lay.activate()
         gw = self.grid_frame.width() if self._sized else WINDOW_W - 28
@@ -3096,6 +3147,49 @@ class MainWindow(QMainWindow):
         self._mark_clashes()
         self._bind()
         self.save()
+        QTimer.singleShot(0, self._fit_height)  # the pill changed width: its row may wrap onto a second line, or back
+
+    # ---------------------------------------------------------------- undo / redo of node picks
+    def _picks(self) -> list[dict]:
+        return [copy.deepcopy(t["sel"]) for t in self.cfg["toggles"]]
+
+    def _pick_menu(self, opening: bool):
+        """A node menu opened / closed: everything it changed is one undo step; no undo while it's open."""
+        if opening:
+            self._picks_before = self._picks()
+        elif self._picks() != self._picks_before:
+            self._undo.append(self._picks_before)
+            self._redo.clear()
+        self._menu_up = opening
+        self._sync_undo()
+
+    def _sync_undo(self):
+        for b, stack, word in ((self.btn_undo, self._undo, "Undo"), (self.btn_redo, self._redo, "Redo")):
+            b.setEnabled(bool(stack) and not self._menu_up)
+            b.setToolTip(f"{word} the last node pick change ({len(stack)} of {UNDO_STEPS} step"
+                         f"{'s' if len(stack) != 1 else ''})" if stack else f"Nothing to {word.lower()}")
+
+    def _restore_picks(self, frm, to, word: str):
+        if self._menu_up or not frm:
+            return
+        to.append(self._picks())
+        for t, sel in zip(self.cfg["toggles"], frm.pop(), strict=True):
+            if sel != t["sel"]:
+                t["sel"] = sel
+                t["on"] = None  # changed picks: their state is unknown until the scene fires, as after a pick
+        self.save()
+        self._rows = []
+        self._show_nodes(self._rows_for(self._layers))
+        self.refresh_states()
+        self._refresh_tags()
+        self._sync_undo()
+        self.flash(f"{word}: node picks")
+
+    def undo(self):
+        self._restore_picks(self._undo, self._redo, "Undo")
+
+    def redo(self):
+        self._restore_picks(self._redo, self._undo, "Redo")
 
     def _selection_changed(self, i: int, slot: str, sel: list):
         t = self.cfg["toggles"][i]
