@@ -13,3 +13,6 @@ Thumbs.db
 .DS_Store
 
 *.bmp
+
+# Font sources; the app ships only fonts/
+Fontbook/

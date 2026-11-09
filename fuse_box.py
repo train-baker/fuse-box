@@ -16,7 +16,7 @@ Fuse Box (formerly Node Toggle) — switch DaVinci Resolve color nodes on and of
   * warns when a key you assign is already a Resolve shortcut (reads your active
     custom keyboard preset)
   * node picker: click and drag over nodes to tick or untick several at once
-  * 3 preset slots, always-on-top status overlay (click a row to toggle)
+  * 3 preset slots
   * "Script Shortcut": adds _Fuse Box to Resolve's Workspace > Scripts menu, a second way to open it;
     a second launch just brings the open window forward
 
@@ -55,6 +55,7 @@ from PySide6.QtGui import (
     QAction,
     QColor,
     QFont,
+    QFontDatabase,
     QFontMetrics,
     QIcon,
     QImage,
@@ -102,7 +103,7 @@ TITLE_TEXT = "#8a7a5c"  # title-bar text (Windows 11): the muted gold of a missi
 TITLE_BG = "#202020"    # Windows 11's own dark title bar, for the faint circle in its icon slot
 FIELD = "#1f1f1f"       # input fields
 LINE = "#090909"        # dividers and field borders
-EDGE = "#18181c"        # outline of the grid box and the overlay, grid dividers: softer than LINE
+EDGE = "#18181c"        # outline of the grid box, grid dividers: softer than LINE
 BTN = "#3b3b3f"         # buttons (R / S / M, In)
 BTN_HOVER = "#46464b"
 TEXT = "#b8b8ba"        # names
@@ -191,7 +192,6 @@ def default_config() -> dict:
     return {
         "toggles": [default_toggle(i) for i in range(NUM_TOGGLES)],
         "presets": {str(i + 1): None for i in range(NUM_PRESETS)},
-        "overlay": {"visible": True, "x": None, "y": None},
         "focus_only": True,
         "post_layer": True,   # mirrors Resolve's "Post Group Node Stack Layer" (not readable by scripts)
         "pinned": False,      # keep the main window above Resolve
@@ -220,7 +220,6 @@ def load_config(demo: bool) -> dict:
     for i, t in enumerate(data.get("toggles", [])[:NUM_TOGGLES]):
         cfg["toggles"][i] = clean_toggle(i, t)
     cfg["presets"].update({k: v for k, v in data.get("presets", {}).items() if k in cfg["presets"]})
-    cfg["overlay"].update(data.get("overlay", {}))
     cfg["focus_only"] = bool(data.get("focus_only", True))
     cfg["post_layer"] = bool(data.get("post_layer", True))
     cfg["pinned"] = bool(data.get("pinned", False))
@@ -969,11 +968,6 @@ class ResolveWatch:
         self.on_gone()
 
 
-# Windows' own windows that take focus in passing: switching apps, the taskbar, Start, the desktop
-_SHELL_WINDOWS = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "MultitaskingViewFrame",
-                  "XamlExplorerHostIslandWindow", "ForegroundStaging", "TaskSwitcherWnd", "Windows.UI.Core.CoreWindow"}
-
-
 def _foreground_ok() -> bool:
     """Windows only: True if Resolve (or this app) is the focused window."""
     if not IS_WIN:
@@ -1495,171 +1489,6 @@ class NodePicker(QPushButton):
         self.changed.emit(self.toggle_index, self.slot, list(self.sel))
 
 
-class Overlay(QWidget):
-    """Frameless always-on-top status panel. Drag to move, click a row to toggle. The icons in the
-    left column: window = show / hide the main window (gold while it's open), X = quit Fuse Box."""
-    row_clicked = Signal(int)
-    open_main = Signal()
-    close_main = Signal()
-    quit_all = Signal()
-    moved = Signal(int, int)
-    ROW_H, PAD = 28, 6          # rows: a 24 px field like a layer-shortcut pill + 4 px gap
-    ICON, GAP = 9, 10           # tab icons: 9 px, with 10 px of space all round them
-    TAB = ICON + 2 * GAP        # visible width of the icon tab on the left
-    TUCK = 10                   # how far the tab runs on, hidden behind the panel
-    PANEL_W = 266               # the scene panel, right of the tab
-    W = TAB + PANEL_W
-    FIELD_R = 8                 # row field: gap to the window's right edge
-    DOT, NAME_X = 7, 25         # row dot: size, also its inset in the field; the name starts NAME_X in
-    KEY_H, KEY_R, NAME_GAP = 14, 12, 8  # key blocks: height, gap to the right edge; gap between name and keys
-    LEFT = TAB + PAD            # rows start here (panel edge + padding)
-    OUTER_R = 5                 # panel and tab share one corner radius; scene fields (3 px) nest inside it
-    TIPS = {"main": "Show / hide the Fuse Box window", "quit": "Quit Fuse Box"}
-
-    def __init__(self):
-        flags = Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus
-        super().__init__(None, flags)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.toggles: list[dict] = []
-        self._press = None
-        self._drag_origin = None
-        self._hover_btn = None  # "main" / "quit" / None
-        self.main_open = False  # the window icon is gold while the main window is open
-        self.setMouseTracking(True)
-        self.setCursor(Qt.PointingHandCursor)
-
-    def set_toggles(self, toggles):
-        self.toggles = toggles
-        self.setFixedSize(self.W, self.PAD * 2 + self.ROW_H * len(toggles))
-        self.update()
-
-    def _icon_centers(self) -> dict[str, QPointF]:
-        """Window icon above the X; the gap between them equals the gap from each icon to the tab's edges."""
-        x = self.TAB / 2
-        quit_y = self.height() - self.GAP - self.ICON / 2
-        return {"main": QPointF(x, quit_y - self.ICON - self.GAP), "quit": QPointF(x, quit_y)}
-
-    def _panel_rect(self) -> QRectF:
-        return QRectF(self.rect()).adjusted(self.TAB + 0.5, 0.5, -0.5, -0.5)
-
-    def _tab_rect(self) -> QRectF:
-        """Its own piece, coming out from behind the panel's left edge, bottom-aligned with it,
-        just big enough for the two icons and the even gaps around them, plus 2 px more on top."""
-        h = 2 * self.ICON + 3 * self.GAP + 2
-        return QRectF(0.5, self.height() - h + 0.5, self.TAB + self.TUCK, h - 1)
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(QPen(QColor(EDGE), 1))
-        tab_bg = QColor(BG_GRID).darker(118)  # the tab first, a shade darker, so the panel sits in front of it
-        tab_bg.setAlpha(245)
-        p.setBrush(tab_bg)
-        p.drawRoundedRect(self._tab_rect(), self.OUTER_R, self.OUTER_R)
-        p.setBrush(QColor(BG_GRID))
-        p.drawRoundedRect(self._panel_rect(), self.OUTER_R, self.OUTER_R)
-        name_font = QFont(self.font())
-        name_font.setPointSizeF(9)
-        key_font = QFont("Consolas" if IS_WIN else "Menlo" if IS_MAC else "DejaVu Sans Mono")
-        key_font.setPointSizeF(8)
-        kfm = QFontMetrics(key_font)
-        x0 = self.LEFT
-        for i, t in enumerate(self.toggles):
-            y = self.PAD + i * self.ROW_H
-            configured = has_selection(t)
-            on = configured and t["on"] is True
-            armed = configured and t["on"] is None
-            p.setPen(QPen(QColor(LINE), 1))  # each scene in its own field, like a layer-shortcut pill
-            p.setBrush(QColor(FIELD))
-            p.drawRoundedRect(QRectF(x0 + 0.5, y + 2.5, self.W - x0 - self.FIELD_R, self.ROW_H - 5), 3, 3)
-            r = QRectF(x0 + self.DOT, y + (self.ROW_H - self.DOT) / 2, self.DOT, self.DOT)
-            if on:
-                p.setPen(Qt.NoPen)
-                p.setBrush(ON_COLOR)
-            elif armed:  # gold ring: picks set, state unknown
-                p.setPen(QPen(ON_COLOR, 1.2))
-                p.setBrush(Qt.NoBrush)
-                r = r.adjusted(0.6, 0.6, -0.6, -0.6)
-            else:
-                p.setPen(QPen(QColor(TEXT_FAINT), 1))
-                p.setBrush(Qt.NoBrush)
-                r = r.adjusted(0.5, 0.5, -0.5, -0.5)
-            p.drawEllipse(r)
-            p.setFont(name_font)
-            p.setPen(QColor(TEXT_BRIGHT) if on else QColor(TEXT) if armed else QColor(TEXT_FAINT))
-            blocks = key_blocks(kfm, t["hotkey"]["text"]) if t.get("hotkey") else []
-            kw = blocks_width(blocks)
-            name_w = self.W - x0 - self.NAME_X - self.KEY_R - kw - self.NAME_GAP
-            name = QFontMetrics(name_font).elidedText(t["name"], Qt.ElideRight, name_w)
-            p.drawText(QRectF(x0 + self.NAME_X, y, name_w, self.ROW_H), Qt.AlignLeft | Qt.AlignVCenter, name)
-            p.setFont(key_font)
-            draw_key_blocks(p, self.W - self.KEY_R - kw, y + (self.ROW_H - self.KEY_H) / 2, self.KEY_H, blocks)
-        c = self._icon_centers()
-        p.setBrush(Qt.NoBrush)
-        # window icon (two overlapping windows): gold while the main window is open, like the pin
-        p.setOpacity(1.0 if self._hover_btn == "main" else 0.8)
-        pen = QPen(QColor(ACCENT) if self.main_open else QColor(TEXT_DIM), 1.3)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.MiterJoin)  # square corners
-        p.setPen(pen)
-        m = c["main"]
-        h, o = self.ICON / 2, self.ICON * 0.3  # both icons fill the same ICON-sized square; o: window offset
-        p.drawRect(QRectF(m.x() - h + o, m.y() - h + o, self.ICON - o, self.ICON - o))  # front window
-        p.drawPolyline([QPointF(m.x() - h, m.y() + h - o), QPointF(m.x() - h, m.y() - h),
-                        QPointF(m.x() + h - o, m.y() - h)])  # back window, peeking out top-left
-        # X: quit Fuse Box (half strength until hovered, like a label chip's ✕)
-        p.setOpacity(1.0 if self._hover_btn == "quit" else 0.5)
-        pen.setColor(ICON_GREY)
-        pen.setWidthF(1.2)
-        p.setPen(pen)
-        q, d = c["quit"], self.ICON / 2 - 0.5
-        p.drawLine(QPointF(q.x() - d, q.y() - d), QPointF(q.x() + d, q.y() + d))
-        p.drawLine(QPointF(q.x() + d, q.y() - d), QPointF(q.x() - d, q.y() + d))
-        p.setOpacity(1.0)
-
-    def _zone(self, pos):
-        if pos.x() >= self.TAB:
-            return None
-        return next((k for k, c in self._icon_centers().items() if abs(pos.y() - c.y()) <= (self.ICON + self.GAP) / 2), None)
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self._press = e.globalPosition().toPoint()
-            self._drag_origin = self.pos()
-
-    def mouseMoveEvent(self, e):
-        if self._press is not None:
-            self.move(self._drag_origin + (e.globalPosition().toPoint() - self._press))
-        hover = self._zone(e.position())
-        if hover != self._hover_btn:
-            self._hover_btn = hover
-            self.setToolTip(self.TIPS.get(hover, ""))
-            self.update()
-
-    def leaveEvent(self, e):
-        self._hover_btn = None
-        self.update()
-
-    def mouseReleaseEvent(self, e):
-        if self._press is None:
-            return
-        delta = e.globalPosition().toPoint() - self._press
-        self._press = None
-        if delta.manhattanLength() > 4:
-            self.moved.emit(self.x(), self.y())
-            return
-        zone = self._zone(e.position())
-        if zone == "main":
-            (self.close_main if self.main_open else self.open_main).emit()
-        elif zone == "quit":
-            self.quit_all.emit()
-        elif e.position().x() >= self.TAB:
-            row = int((e.position().y() - self.PAD) // self.ROW_H)
-            if 0 <= row < len(self.toggles):
-                self.row_clicked.emit(row)
-
-
 class FlowLayout(QLayout):
     """Lays items left to right and wraps onto new lines (Qt's classic flow layout)."""
 
@@ -1786,7 +1615,7 @@ class IconButton(QPushButton):
             p.drawLine(pt(4, 12), pt(20, 12))
         else:  # a letter (F / P)
             f = QFont(self.font())
-            f.setPointSizeF(7)
+            f.setPixelSize(9)
             f.setWeight(QFont.DemiBold)
             p.setFont(f)
             p.setPen(self.color)
@@ -1843,7 +1672,7 @@ class TagStateBox(QPushButton):
 
 class SceneState(QFrame):
     """[HOLD] [ON] [OFF] for one scene, the current one gold, like a node-label chip.
-    HOLD parks the scene: no nodes change, and its shortcut and overlay row do nothing until ON / OFF is picked;
+    HOLD parks the scene: no nodes change, and its shortcut does nothing until ON / OFF is picked;
     ON / OFF switch the scene's nodes."""
     picked = Signal(object)  # None (HOLD), True (ON) or False (OFF)
 
@@ -1856,7 +1685,7 @@ class SceneState(QFrame):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(2)
         self.boxes = {}
-        for state, word, tip in ((None, "HOLD", "HOLD: leave the nodes as they are — the scene's shortcut and\noverlay row do nothing until you pick ON or OFF"),
+        for state, word, tip in ((None, "HOLD", "HOLD: leave the nodes as they are — the scene's shortcut\ndoes nothing until you pick ON or OFF"),
                                  (True, "ON", "Switch this scene's nodes ON"),
                                  (False, "OFF", "Switch this scene's nodes OFF")):
             b = TagStateBox(word, False, False, tip)
@@ -2222,25 +2051,26 @@ class LayerPill(QFrame):
 
 # ----------------------------------------------------------------------------- main window
 
-# Resolve's UI face is Open Sans; Noto Sans is the same design and is more often installed with all weights
-FONT = '"Noto Sans", "Open Sans", "Segoe UI", "Helvetica Neue", "DejaVu Sans", Arial'
-CHIP_FONT = f'"Inter", {FONT}'  # ON / OFF / HOLD: Inter SemiBold sits between Noto's Regular and Bold
-MONO = 'Consolas, Menlo, "DejaVu Sans Mono", monospace'
+# The fonts/ folder ships with the app and is loaded at start (load_fonts), so Windows and macOS look the same.
+# "Fuse Box Digits" is JetBrains Mono cut down to 0-9: listed first, it draws every digit, and Qt takes
+# everything else from Inter. Sizes are in px: a pt is 1/96 in on Windows but 1/72 in on macOS.
+FONTS_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "fonts"  # _MEIPASS: a packaged app
+FONT = '"Fuse Box Digits", "Inter 18pt", "Inter", "Segoe UI", "Helvetica Neue", Arial'
 SCENE_BARS = "\n".join(f'QLineEdit#colname[scene="{i}"] {{ border-top-color: {c}; }}' for i, c in enumerate(SCENE_COLORS))
 STYLE = f"""
-* {{ font-family: {FONT}; font-size: 9pt; color: {TEXT}; }}
+* {{ font-family: {FONT}; font-size: 12px; color: {TEXT}; }}
 QMainWindow, QWidget#root {{ background: {BG}; }}
 QLabel#muted {{ color: {TEXT_DIM}; }}
 QLabel#flash {{ color: {ACCENT}; }}
 QLabel#flash[idle="true"] {{ color: {TEXT_FAINT}; }}
 QLabel#rowlabel {{ color: {TEXT_DIM}; padding-right: 8px; }}
 QLabel#rowlabel[layer="true"] {{ color: {TEXT}; }}
-QLabel#one {{ font-size: 7pt; color: {TEXT_DIM}; border: 1px solid {BTN}; border-radius: 2px; padding: 0 3px;
+QLabel#one {{ font-size: 9px; color: {TEXT_DIM}; border: 1px solid {BTN}; border-radius: 2px; padding: 0 3px;
     min-height: 12px; max-height: 12px; }}
 QFrame#grid {{ background: {BG_GRID}; border: none; border-radius: 2px; }}
 QFrame#sep {{ background: {EDGE}; max-height: 1px; min-height: 1px; margin: 5px 0; }}
 QLineEdit#colname {{ background: {BG_DARK}; border: 1px solid transparent; border-top: 2px solid {GREEN};
-    border-radius: 0; padding: 7px 8px 3px 8px; color: {TEXT}; font-size: 9pt; }}
+    border-radius: 0; padding: 7px 8px 3px 8px; color: {TEXT}; font-size: 12px; }}
 QLineEdit#colname:hover {{ border-left-color: {BTN}; border-right-color: {BTN}; border-bottom-color: {BTN}; }}
 {SCENE_BARS}
 QLineEdit#colname:focus {{ border-left-color: transparent; border-right-color: transparent;
@@ -2258,14 +2088,13 @@ QPushButton#cell:hover {{ border-color: {BTN_HOVER}; }}
 QPushButton#cell[empty="true"] {{ color: {TEXT_FAINT}; }}
 QPushButton#cell[all="true"] {{ color: {ACCENT}; }}
 QPushButton#cell[missing="true"] {{ color: #8a7a5c; font-style: italic; }}
-QPushButton#cell[kind="hotkey"] {{ font-family: {MONO}; }}
 QPushButton#cell[recording="true"] {{ color: {TEXT}; }}
 QPushButton#cell[clash="true"] {{ border: 1px solid {RED}; }}
 QFrame#pill {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px; }}
 QLabel#pillname {{ color: {TEXT_FAINT}; }}
 QLabel#pillname[on="true"] {{ color: {TEXT}; }}
 QPushButton#pillkey {{ background: {BTN}; border: 1px solid transparent; border-radius: 2px; padding: 0 6px;
-    font-family: {MONO}; font-size: 8pt; color: {TEXT_DIM}; min-height: 14px; }}
+    font-size: 11px; color: {TEXT_DIM}; min-height: 14px; }}
 QPushButton#pillkey[recording="true"] {{ color: {TEXT}; }}
 QPushButton#pillkey[clash="true"] {{ border-color: {RED}; }}
 QFrame#tagfield {{ background: {FIELD}; border: 1px solid {LINE}; border-radius: 3px; }}
@@ -2274,7 +2103,7 @@ QFrame#tag[armed="true"] {{ background: transparent; border: 1px solid {BTN_HOVE
 QLabel#tagname {{ color: {TEXT}; }}
 QLabel#tagname[armed="true"] {{ color: {TEXT_FAINT}; }}
 QPushButton#tagstate {{ background: {BTN}; border: 1px solid transparent; border-radius: 2px; padding: 0 6px;
-    font-family: {CHIP_FONT}; font-size: 8pt; font-weight: 600; color: {TEXT_DIM}; min-height: 14px; }}
+    font-size: 11px; font-weight: 600; color: {TEXT_DIM}; min-height: 14px; }}
 QPushButton#tagstate:hover {{ color: {TEXT}; }}
 QPushButton#tagstate[clash="true"] {{ background: #5e2421; color: {RED}; }}
 QPushButton#tagstate[sel="true"] {{ background: {ACCENT}; color: {LINE}; }}
@@ -2325,12 +2154,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._sized = False  # first fit done: the window has its starting width
         self._grid_need = 0
-        self._quitting = False
         self.server = None  # single-instance QLocalServer, set by main()
         self.demo = demo
         self.standby = standby  # launched with --standby: stay hidden until Resolve runs
         self._parked = standby
-        self._main_closed = False  # main window hidden from the overlay's ✕
         self.cfg = load_config(demo)
         self.bridge = ResolveBridge(demo)
         self.preset_slot = "1"
@@ -2354,24 +2181,6 @@ class MainWindow(QMainWindow):
         if self.cfg.get("pinned"):
             QTimer.singleShot(0, self._apply_pin)
 
-        self.overlay = Overlay()
-        self.overlay.row_clicked.connect(self.run_toggle)
-        self.overlay.open_main.connect(self.open_main)
-        self.overlay.close_main.connect(self.close_main)
-        self.overlay.quit_all.connect(self.quit_all)
-        self.overlay.moved.connect(self._overlay_moved)
-        ov = self.cfg["overlay"]
-        self.overlay.set_toggles(self.cfg["toggles"])
-        if ov.get("x") is not None and on_screen(ov["x"], ov["y"]):
-            self.overlay.move(ov["x"], ov["y"])
-        else:
-            geo = QApplication.primaryScreen().availableGeometry()
-            self.overlay.move(geo.right() - self.overlay.width() - 24, geo.top() + 80)
-        if IS_WIN:  # the overlay floats over Resolve only: any other focused app comes in front of it
-            self._layer_timer = QTimer(self, interval=250)
-            self._layer_timer.timeout.connect(self._overlay_layer)
-            self._layer_timer.start()
-
         self.hotkeys = HotkeyEngine()
         self.hotkeys.fired.connect(self.on_hotkey)
         self.hotkeys.focus_only = self.cfg["focus_only"]
@@ -2382,7 +2191,7 @@ class MainWindow(QMainWindow):
         self._show_nodes(self._rows_for(1))
         self.refresh_states()
         self._suspended = False
-        self._main_wanted = not standby  # standby starts as the overlay alone
+        self._main_wanted = not standby  # standby: hotkeys only, the window opens from Resolve's Scripts menu
         self.resolve_windows.connect(self._on_resolve_windows, Qt.QueuedConnection)
         self.layer_settings.connect(self._apply_layer_settings, Qt.QueuedConnection)
         self._layer_read_busy = False
@@ -2391,7 +2200,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, self._read_layers)
             threading.Thread(target=watch_resolve_layer_settings, args=(self._layer_watch_emit,), daemon=True).start()
         self.watch = ResolveWatch(self._resolve_closed, self._resolve_windows_thread, ignore_pid)
-        self._native = [int(self.winId()), int(self.overlay.winId())]  # for hiding from the watcher thread
+        self._native = [int(self.winId())]  # for hiding from the watcher thread
         if demo or (self.watch.running() and not standby):
             self._parked = False
             self.try_connect()
@@ -2415,7 +2224,7 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(8, 10, 8, 10)  # the grid box's left line under the title's first letter
         v.setSpacing(8)
 
-        # header: refresh · clean plate · pin · overlay
+        # header: refresh · clean plate · pin
         h = QHBoxLayout()
         h.setSpacing(6)
         h.addStretch(1)
@@ -2436,10 +2245,6 @@ class MainWindow(QMainWindow):
         self.btn_pin.setChecked(self.cfg.get("pinned", False))
         self.btn_pin.toggled.connect(self._set_pinned)
         h.addWidget(self.btn_pin)
-        self.btn_overlay = QPushButton("Overlay", checkable=True)
-        self.btn_overlay.setChecked(self.cfg["overlay"].get("visible", True))
-        self.btn_overlay.toggled.connect(self._set_overlay_visible)
-        h.addWidget(self.btn_overlay)
         for i in range(h.count()):
             if w := h.itemAt(i).widget():
                 w.setProperty("head", True)  # styled: darker with yellow text when down
@@ -2812,12 +2617,6 @@ class MainWindow(QMainWindow):
         for key, pill in self.pills.items():
             lk = self.cfg["layer_keys"].get(key, {})
             pill.set_state(lk.get("on", True), lk.get("one_clip", False))
-        self.overlay.set_toggles(self.cfg["toggles"])
-        # standby: the overlay is the whole UI until the main window is opened from it
-        overlay_only = (self.standby or self._main_closed) and not self.isVisible()
-        self.overlay.main_open = self.isVisible()
-        self.overlay.update()
-        self.overlay.setVisible((self.btn_overlay.isChecked() or overlay_only) and not self._parked)
 
     # ---------------------------------------------------------------- tags
     def _visible_tags(self) -> list[dict]:
@@ -3055,16 +2854,6 @@ class MainWindow(QMainWindow):
         self.save()
         self.refresh_states()
 
-    def showEvent(self, e):  # keep the overlay's ✕ in step with the main window however it was opened
-        super().showEvent(e)
-        self.overlay.main_open = True
-        self.overlay.update()
-
-    def hideEvent(self, e):
-        super().hideEvent(e)
-        self.overlay.main_open = False
-        self.overlay.update()
-
     def moveEvent(self, e):
         super().moveEvent(e)
         if self.isVisible() and not self.isMinimized():
@@ -3146,44 +2935,6 @@ class MainWindow(QMainWindow):
             ctypes.windll.user32.SetWindowPos(int(self.winId()), -1 if on else -2, 0, 0, 0, 0,
                                               0x0001 | 0x0002 | 0x0010)  # TOPMOST/NOTOPMOST, keep size/pos/focus
 
-    def _overlay_layer(self):
-        """Windows: topmost while Resolve (or Fuse Box) is the focused app; when another app takes focus,
-        tucked in just behind it, so it stays over Resolve but under everything you switch to. Decided from
-        the overlay's real state each time, and system windows (Alt+Tab, taskbar, Start, the desktop) are
-        left alone, so switching apps doesn't make it jump or blink."""
-        if not self.overlay.isVisible():
-            return
-        import ctypes
-        u32 = ctypes.WinDLL("user32")  # own copy: the prototypes below don't leak into other ctypes calls
-        u32.GetForegroundWindow.restype = ctypes.c_void_p
-        u32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        u32.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
-        u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p] + [ctypes.c_int] * 4 + [ctypes.c_uint]
-        keep = 0x0001 | 0x0002 | 0x0010  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
-        hwnd = int(self.overlay.winId())
-        on_top = bool(u32.GetWindowLongW(hwnd, -20) & 0x8)  # GWL_EXSTYLE has WS_EX_TOPMOST
-        if _foreground_ok():
-            if not on_top:
-                u32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, keep)  # HWND_TOPMOST
-            return
-        fg = u32.GetForegroundWindow()
-        if not fg or not on_top or u32.GetWindowLongW(fg, -20) & 0x8:  # nothing focused, done, or a topmost pop-up
-            return
-        cls = ctypes.create_unicode_buffer(64)
-        u32.GetClassNameW(fg, cls, 64)
-        if cls.value in _SHELL_WINDOWS:
-            return
-        u32.SetWindowPos(hwnd, fg, 0, 0, 0, 0, keep)  # just behind it (and no longer topmost)
-
-    def _set_overlay_visible(self, on: bool):
-        self.cfg["overlay"]["visible"] = on
-        self.overlay.setVisible(on)
-        self.save()
-
-    def _overlay_moved(self, x, y):
-        self.cfg["overlay"].update({"x": x, "y": y})
-        self.save()
-
     def _set_focus_only(self, on: bool):
         self.cfg["focus_only"] = on
         self.hotkeys.focus_only = on
@@ -3248,7 +2999,7 @@ class MainWindow(QMainWindow):
 
     def _wake(self):
         """Resolve's window is up: resume; the main window only comes back if it was open
-        (in standby it starts as the overlay alone, the window loaded but hidden)."""
+        (in standby it starts hidden, hotkeys only)."""
         self._parked = False
         self._sig = None  # project may have changed: re-read everything
         if self._main_wanted:
@@ -3264,7 +3015,6 @@ class MainWindow(QMainWindow):
             self._main_wanted = self.isVisible()
             self._parked = True
             self.hide()
-            self.overlay.hide()
 
     def open_main(self):
         if self._parked:
@@ -3275,19 +3025,6 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         self.refresh_states()
-
-    def close_main(self):
-        """Overlay ✕: hide the main window but keep running (hotkeys and overlay stay)."""
-        self._main_wanted = False
-        self._main_closed = True
-        self.hide()
-        self.refresh_states()
-
-    def quit_all(self):
-        """Overlay power button: close the main window and the overlay (quits Fuse Box)."""
-        self._quitting = True
-        self.close()
-        QApplication.quit()
 
     def bring_to_front(self):
         if self._parked:
@@ -3441,7 +3178,7 @@ class MainWindow(QMainWindow):
         if not has_selection(t):
             self.flash(f"{t['name']} has no nodes selected")
             return
-        if state is None and t["on"] is None:  # HOLD: the shortcut and overlay leave the nodes alone
+        if state is None and t["on"] is None:  # HOLD: the shortcut leaves the nodes alone
             self.flash(f"{t['name']} is on HOLD — pick ON or OFF to use it")
             return
         new_state = (t["on"] is False) if state is None else state  # ON → OFF, OFF → ON
@@ -3563,15 +3300,17 @@ class MainWindow(QMainWindow):
             self._show_nodes(self._rows_for(1))
         self.flash(f"Loaded preset {slot} (states reset to ON)")
 
-    def closeEvent(self, e):
-        if not self._quitting:  # the window's X only closes the main window; the overlay stays
-            e.ignore()
-            self.close_main()
-            return
+    def closeEvent(self, e):  # the window's X quits Fuse Box (minimise it to keep the hotkeys out of the way)
         self.hotkeys.stop()
-        self.overlay.close()
         self.save()
         super().closeEvent(e)
+        QApplication.quit()
+
+
+def load_fonts():
+    """Register the bundled fonts (fonts/*.ttf) for this run; nothing is installed on the system."""
+    for f in sorted(FONTS_DIR.glob("*.ttf")):
+        QFontDatabase.addApplicationFont(str(f))
 
 
 class AppStyle(QProxyStyle):
@@ -3600,6 +3339,7 @@ def main():
     for role in (QPalette.Window, QPalette.Base, QPalette.Button):
         pal.setColor(role, QColor(BG))
     app.setPalette(pal)
+    load_fonts()
     app.setStyleSheet(STYLE)
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     name = f"{AUTOSTART_NAME}-{os.environ.get('USERNAME') or os.environ.get('USER') or 'user'}" + ("-demo" if args.demo else "")
@@ -3610,7 +3350,7 @@ def main():
         sock.waitForBytesWritten(300)
         return
     QLocalServer.removeServer(name)
-    app.setQuitOnLastWindowClosed(False)  # lives on with only the overlay (or nothing) showing; ⏻ or Resolve quitting ends it
+    app.setQuitOnLastWindowClosed(False)  # standby and Resolve's project switches hide the window: keep running
     w = MainWindow(args.demo, standby=args.standby, ignore_pid=args.after)
     w.server = QLocalServer()
     w.server.listen(name)
