@@ -968,8 +968,8 @@ class ResolveWatch:
         self.on_gone()
 
 
-def _foreground_ok() -> bool:
-    """Windows only: True if Resolve (or this app) is the focused window."""
+def _foreground_ok(app_pid: int) -> bool:
+    """Windows only: True if Resolve (or this app, process app_pid) is the focused window."""
     if not IS_WIN:
         return True
     import ctypes
@@ -977,7 +977,7 @@ def _foreground_ok() -> bool:
     user32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
     pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(pid))
-    if pid.value == os.getpid():
+    if pid.value == app_pid:
         return True
     h = k32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not h:
@@ -992,48 +992,33 @@ def _foreground_ok() -> bool:
     return False
 
 
-class HotkeyEngine(QObject):
-    """Global keyboard listener (pynput). Emits `fired(id)` on the Qt thread:
-    an int for a scene (toggle column), a str for a layer key ("clip:2", "postclip", "tags"…)."""
-    fired = Signal(object)
+class HotkeyListener:
+    """Global keyboard listener (pynput): calls `on_fire(id)` for a bound hotkey, an int for a scene
+    (toggle column), a str for a layer key ("clip:2", "postclip", "tags"…).
+    It runs in a process of its own (hotkey_process): Windows holds every key press, in every app, until
+    the keyboard hook has answered, and Resolve's scripting module keeps Python's lock (the GIL) while it
+    waits on Resolve, so a hook inside the app held Resolve's own keys (Space to stop playback) for up to 1 s."""
 
-    def __init__(self):
-        super().__init__()
-        self.bindings: list[tuple[int, dict]] = []
+    def __init__(self, on_fire, app_pid: int):
+        self.on_fire = on_fire
+        self.app_pid = app_pid
+        self.bindings: list[tuple[int | str, dict]] = []
         self.focus_only = True
-        self.error = ""
-        self._listener = None
         self._mods: set[str] = set()
         self._down: set = set()
         self._modmap = {}
 
-    def start(self) -> bool:
-        try:
-            from pynput import keyboard
-        except Exception as e:
-            self.error = f"Global hotkeys unavailable ({e}). Install with: pip install pynput"
-            return False
+    def start(self):
+        from pynput import keyboard
         K = keyboard.Key
         for name, keys in {"ctrl": ("ctrl", "ctrl_l", "ctrl_r"), "shift": ("shift", "shift_l", "shift_r"),
                            "alt": ("alt", "alt_l", "alt_r", "alt_gr"), "meta": ("cmd", "cmd_l", "cmd_r")}.items():
             for k in keys:
                 if hasattr(K, k):
                     self._modmap[getattr(K, k)] = name
-        try:
-            self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
-            self._listener.daemon = True
-            self._listener.start()
-        except Exception as e:
-            self.error = f"Global hotkeys unavailable: {e}"
-            return False
-        return True
-
-    def stop(self):
-        if self._listener:
-            self._listener.stop()
-
-    def set_bindings(self, bindings: list[tuple]):
-        self.bindings = [(k, hk) for k, hk in bindings if hk]
+        listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
+        listener.daemon = True
+        listener.start()
 
     @staticmethod
     def _vk(key):
@@ -1069,8 +1054,8 @@ class HotkeyEngine(QObject):
             if set(hk.get("mods", [])) != mods:
                 continue
             if (vk is not None and hk.get("vk") == vk) or (char and hk.get("char") == char):
-                if not self.focus_only or _foreground_ok():
-                    self.fired.emit(idx)
+                if not self.focus_only or _foreground_ok(self.app_pid):
+                    self.on_fire(idx)
                 return
 
     def _on_release(self, key):
@@ -1080,6 +1065,81 @@ class HotkeyEngine(QObject):
             return
         vk = self._vk(key)
         self._down.discard(vk if vk is not None else (getattr(key, "char", None) or "").lower() or None)
+
+
+def hotkey_process(app_pid: int):
+    """`--hotkeys <app pid>`: the listener's own process. Reads {"bindings", "focus_only"} lines on stdin,
+    writes the JSON id of each hotkey pressed (or {"error": …}) on stdout, and ends when the app closes stdin."""
+    def send(msg):
+        print(json.dumps(msg), flush=True)
+
+    hk = HotkeyListener(send, app_pid)
+    try:
+        hk.start()
+    except ImportError as e:
+        send({"error": f"Global hotkeys unavailable ({e}). Install with: pip install pynput"})
+        return
+    except Exception as e:
+        send({"error": f"Global hotkeys unavailable: {e}"})
+        return
+    for line in sys.stdin:
+        msg = json.loads(line)
+        hk.bindings = [(k, h) for k, h in msg["bindings"] if h]
+        hk.focus_only = msg["focus_only"]
+
+
+class HotkeyEngine(QObject):
+    """The app's side of the hotkey process (see HotkeyListener for why it is a process):
+    emits `fired(id)` on the Qt thread for each hotkey, or `failed(message)` if hotkeys can't run."""
+    fired = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, focus_only: bool):
+        super().__init__()
+        self.bindings: list[tuple] = []
+        self.focus_only = focus_only
+        self._proc = None
+
+    def start(self):
+        try:
+            self._proc = subprocess.Popen(_launch_cmd("--hotkeys", str(os.getpid())), stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE, text=True, encoding="utf-8",
+                                          creationflags=subprocess.CREATE_NO_WINDOW if IS_WIN else 0)
+        except OSError as e:
+            self.failed.emit(f"Global hotkeys unavailable: {e}")
+            return
+        threading.Thread(target=self._read, args=(self._proc,), daemon=True).start()
+        self._send()
+
+    def _read(self, proc):
+        for line in proc.stdout:
+            msg = json.loads(line)
+            if isinstance(msg, dict):
+                self.failed.emit(msg["error"])
+                return
+            self.fired.emit(msg)
+        if self._proc is proc:  # ended without stop()
+            self.failed.emit("Global hotkeys stopped: restart Fuse Box to get them back")
+
+    def _send(self):
+        if self._proc:
+            with contextlib.suppress(OSError):  # the process is gone: _read has said so
+                self._proc.stdin.write(json.dumps({"bindings": self.bindings, "focus_only": self.focus_only}) + "\n")
+                self._proc.stdin.flush()
+
+    def set_bindings(self, bindings: list[tuple]):
+        self.bindings = bindings
+        self._send()
+
+    def set_focus_only(self, on: bool):
+        self.focus_only = on
+        self._send()
+
+    def stop(self):
+        proc, self._proc = self._proc, None
+        if proc:
+            with contextlib.suppress(OSError):
+                proc.stdin.close()  # the process ends on its own
 
 
 # ----------------------------------------------------------------------------- widgets
@@ -2181,12 +2241,11 @@ class MainWindow(QMainWindow):
         if self.cfg.get("pinned"):
             QTimer.singleShot(0, self._apply_pin)
 
-        self.hotkeys = HotkeyEngine()
+        self.hotkeys = HotkeyEngine(self.cfg["focus_only"])
         self.hotkeys.fired.connect(self.on_hotkey)
-        self.hotkeys.focus_only = self.cfg["focus_only"]
+        self.hotkeys.failed.connect(lambda msg: self.flash(msg, 0))
         self._bind()
-        if not self.hotkeys.start():
-            self.flash(self.hotkeys.error, 0)
+        self.hotkeys.start()
 
         self._show_nodes(self._rows_for(1))
         self.refresh_states()
@@ -2937,7 +2996,7 @@ class MainWindow(QMainWindow):
 
     def _set_focus_only(self, on: bool):
         self.cfg["focus_only"] = on
-        self.hotkeys.focus_only = on
+        self.hotkeys.set_focus_only(on)
         self.save()
 
     # ---------------------------------------------------------------- Resolve sync
@@ -3329,7 +3388,10 @@ def main():
     ap.add_argument("--demo", action="store_true", help="use a fake Resolve to try the UI")
     ap.add_argument("--standby", action="store_true", help="stay hidden until Resolve runs")
     ap.add_argument("--after", type=int, help=argparse.SUPPRESS)  # pid of a Resolve that is shutting down
+    ap.add_argument("--hotkeys", type=int, help=argparse.SUPPRESS)  # run the hotkey process for this app pid
     args = ap.parse_args()
+    if args.hotkeys is not None:
+        return hotkey_process(args.hotkeys)
     if args.demo:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
     app = QApplication(sys.argv)
