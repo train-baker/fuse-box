@@ -1234,6 +1234,50 @@ class Label(QLabel):
         return size
 
 
+class TailLabel(Label):
+    """Label that, short of room, keeps its start and the last TAIL characters before the file extension, plus the
+    extension: 'Reel-Rob-Borges-Pro…250617T2200.mov'."""
+    TAIL = 11
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._full = super().text()
+
+    def setText(self, text: str):
+        self._full = text
+        self.updateGeometry()
+        self._elide()
+
+    def _room(self, text: str) -> QSize:
+        m = self.contentsMargins()
+        return QSize(math.ceil(text_width(self.font(), text)) + m.left() + m.right() + 1,
+                     super().sizeHint().height())
+
+    def sizeHint(self):
+        return self._room(self._full)
+
+    def _cut(self) -> int:
+        """Where the kept end starts: TAIL characters before the extension (".mov"), if there is one."""
+        ext = re.search(r"\.\w{1,5}$", self._full)
+        return max(0, (ext.start() if ext else len(self._full)) - self.TAIL)
+
+    def minimumSizeHint(self):
+        return self._room("…" + self._full[self._cut():])
+
+    def _elide(self):
+        t, w, f = self._full, self.contentsRect().width(), self.font()
+        if (cut := self._cut()) and text_width(f, t) > w:
+            head, tail = t[:cut], "…" + t[cut:]
+            while head and text_width(f, head + tail) > w:
+                head = head[:-1]
+            t = head.rstrip() + tail
+        super().setText(t)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._elide()
+
+
 class Block(NamedTuple):
     text: str
     width: float
@@ -2602,7 +2646,7 @@ class MainWindow(QMainWindow):
         f = QHBoxLayout()
         f.setSpacing(6)
         self.conn_dot = StateDot(7)
-        self.conn_label = Label("Connecting…", objectName="muted")
+        self.conn_label = TailLabel("Connecting…", objectName="muted")  # takes the room left; the clip name ends it
         # "DR 21 · clip [+] · 3 layers": the + box (every other clip too) sits right after the clip name
         self.all_clips_box = IconButton("plus", "…and every other enabled clip in the timeline", 12, 12,
                                         boxed=True, icon=8.0)
@@ -2615,7 +2659,8 @@ class MainWindow(QMainWindow):
         f.addWidget(self.all_clips_box)
         f.addWidget(self.conn_rest)
         f.addStretch(1)
-        self.chk_all = QCheckBox("Apply to all clips in the Timeline", objectName="allclips")
+        f.addSpacing(10)  # the same gap as between the boxes on the right, once the clip name is shortened
+        self.chk_all =QCheckBox("Apply to all clips in the Timeline", objectName="allclips")
         self.chk_all.setToolTip("Unticked: scenes, layer keys and node labels change the clip under the playhead "
                                 "only.\nTicked: every enabled clip in the timeline (a scene or layer key set to "
                                 "“This clip only” still changes just that clip).\nTimeline nodes belong to the "
@@ -2624,7 +2669,6 @@ class MainWindow(QMainWindow):
         f.addWidget(self.chk_all)  # on the right, next to Script Shortcut: it stays put as the clip name changes
         f.addSpacing(10)
         self.conn_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
-        self.conn_label.setMaximumWidth(520)
         # status line: its own row, above the footer
         self.status = Label("", objectName="flash")
         self.status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -3493,8 +3537,8 @@ class MainWindow(QMainWindow):
         rest = ""
         if item:
             gname = _safe(grp.GetName) if grp else None
-            parts.append(item.GetName() + (f"  ({gname})" if gname else ""))
-            rest = f"·  {layers} layer{'s' if layers != 1 else ''}"
+            parts.append(item.GetName())  # last, so a shortened line still ends with the clip name's end
+            rest = (f"({gname})  " if gname else "") + f"·  {layers} layer{'s' if layers != 1 else ''}"
         elif tl:
             parts.append("no clip under playhead")
         self._has_clip = bool(item)
