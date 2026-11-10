@@ -1179,62 +1179,11 @@ def key_parts(text: str) -> list[str]:
     return text.split("+")
 
 
-# 2m, 35.9s, L1, R3D: a word with a digit in it is all JetBrains Mono, except brackets: "(1" keeps its "(" in Inter
-DIGIT_WORD = re.compile(r"[^\s()\[\]{}]*\d[^\s()\[\]{}]*")
-
-
-def mono_runs(text: str, font: QFont) -> list[tuple[str, QFont]]:
-    """text as (piece, font) runs: the words that hold a digit in JetBrains Mono, the rest in `font`."""
-    mono = QFont(font)
-    mono.setFamilies(["JetBrains Mono"])
-    runs, pos = [], 0
-    for m in DIGIT_WORD.finditer(text):
-        runs += [(text[pos:m.start()], font), (m.group(), mono)]
-        pos = m.end()
-    runs.append((text[pos:], font))
-    return [(t, f) for t, f in runs if t]
-
-
 def text_width(font: QFont, text: str) -> float:
-    return sum(QFontMetricsF(f).horizontalAdvance(t) for t, f in mono_runs(text, font))
+    return QFontMetricsF(font).horizontalAdvance(text)
 
 
-def draw_text(p: QPainter, rect: QRectF, flags, text: str) -> None:
-    """p.drawText(rect, flags, text) for one line, with mono_runs' fonts, on the painter font's baseline."""
-    font = p.font()
-    fm = QFontMetricsF(font)
-    a = getattr(flags, "value", flags)
-    runs = [(t, f, QFontMetricsF(f).horizontalAdvance(t)) for t, f in mono_runs(text, font)]
-    w = sum(rw for _t, _f, rw in runs)
-    x = (rect.right() - w if a & Qt.AlignRight.value else
-         rect.center().x() - w / 2 if a & Qt.AlignHCenter.value else rect.left())
-    y = (rect.bottom() - fm.descent() if a & Qt.AlignBottom.value else
-         rect.center().y() + (fm.ascent() - fm.descent()) / 2 if a & Qt.AlignVCenter.value else rect.top() + fm.ascent())
-    for t, f, rw in runs:
-        p.setFont(f)
-        p.drawText(QPointF(x, y), t)
-        x += rw
-    p.setFont(font)
-
-
-class Label(QLabel):
-    """QLabel that asks for the room draw_text needs: JetBrains Mono runs wider than Inter."""
-
-    def sizeHint(self):
-        return self._wider(super().sizeHint())
-
-    def minimumSizeHint(self):
-        return self._wider(super().minimumSizeHint())
-
-    def _wider(self, size: QSize) -> QSize:
-        t = self.text()
-        if "\n" not in t and DIGIT_WORD.search(t):
-            extra = text_width(self.font(), t) - QFontMetricsF(self.font()).horizontalAdvance(t)
-            size.setWidth(size.width() + math.ceil(extra))
-        return size
-
-
-class TailLabel(Label):
+class TailLabel(QLabel):
     """Label that, short of room, keeps its start and the last TAIL characters before the file extension, plus the
     extension: 'Reel-Rob-Borges-Pro…250617T2200.mov'."""
     TAIL = 11
@@ -1314,7 +1263,7 @@ def draw_key_blocks(p: QPainter, x: float, y: float, h: float, blocks: list[Bloc
             p.setBrush(QColor(BTN))
             p.drawRoundedRect(r, 4, 4)
         p.setPen(QColor(TEXT_DIM if b.boxed else TEXT if i == len(blocks) - 1 else PLUS_GREY))
-        draw_text(p, r, Qt.AlignCenter, b.text)
+        p.drawText(r, Qt.AlignCenter, b.text)
         x += b.width
 
 
@@ -1488,7 +1437,7 @@ class _MissingRow(QWidget):
         p.setBrush(QColor(BLUE if a.isChecked() else BTN))  # QMenu::indicator
         p.drawRoundedRect(QRectF(5, (self.height() - 11) / 2, 11, 11), 3, 3)
         p.setPen(QColor(MISSING_GOLD))
-        draw_text(p, QRectF(self.TEXT_X, 0, self.width() - self.TEXT_X, self.height()),
+        p.drawText(QRectF(self.TEXT_X, 0, self.width() - self.TEXT_X, self.height()),
                   Qt.AlignLeft | Qt.AlignVCenter, self.text)
 
 
@@ -1630,11 +1579,11 @@ class NodePicker(QPushButton):
                 if x + w > right:  # out of room: end on an ellipsis
                     p.setFont(font)
                     p.setPen(QColor(TEXT))
-                    draw_text(p, QRectF(x, 0, right - x, self.height()), Qt.AlignLeft | Qt.AlignVCenter, "…")
+                    p.drawText(QRectF(x, 0, right - x, self.height()), Qt.AlignLeft | Qt.AlignVCenter, "…")
                     return
                 p.setFont(pf)
                 p.setPen(QColor(pc))
-                draw_text(p, QRectF(x, 0, w, self.height()), Qt.AlignLeft | Qt.AlignVCenter, piece)
+                p.drawText(QRectF(x, 0, w, self.height()), Qt.AlignLeft | Qt.AlignVCenter, piece)
                 x += w
 
     def _render(self):
@@ -2026,7 +1975,7 @@ class TagChip(QFrame):
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 0, 5, 0)
         h.setSpacing(2)
-        self.name = Label(tag["name"], objectName="tagname")
+        self.name = QLabel(tag["name"], objectName="tagname")
         self.name.setProperty("armed", armed)
         self.name.setCursor(Qt.PointingHandCursor)
         self.name.setProperty("clash", clash)
@@ -2339,7 +2288,7 @@ class LayerPill(QFrame):
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 0, 4, 0)
         h.setSpacing(6)
-        self.name = Label(title, objectName="pillname")
+        self.name = QLabel(title, objectName="pillname")
         self.name.setCursor(Qt.PointingHandCursor)  # clicking the name steps the state (see mouseReleaseEvent)
         h.addWidget(self.name)
         dots = QHBoxLayout()
@@ -2348,7 +2297,7 @@ class LayerPill(QFrame):
                                       True: "Switch the whole layer ON", False: "Switch the whole layer OFF"},
                                lambda s: self.picked.emit(self.key, s), dots)
         h.addLayout(dots)
-        self.one = Label("1 clip", objectName="one")
+        self.one = QLabel("1 clip", objectName="one")
         self.one.setToolTip("This clip only")
         self.one.setAlignment(Qt.AlignCenter)
         h.addWidget(self.one)
@@ -2383,12 +2332,9 @@ class LayerPill(QFrame):
 # ----------------------------------------------------------------------------- main window
 
 # The fonts/ folder ships with the app and is loaded at start (load_fonts), so Windows and macOS look the same.
-# Labels and buttons draw a whole word that holds a digit in JetBrains Mono (draw_text); elsewhere (text fields)
-# only the digits are.
-# "Fuse Box Digits" is JetBrains Mono cut down to 0-9: listed first, it draws every digit, and Qt takes
-# everything else from Inter. Sizes are in px: a pt is 1/96 in on Windows but 1/72 in on macOS.
+# Everything is Inter. Sizes are in px: a pt is 1/96 in on Windows but 1/72 in on macOS.
 FONTS_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "fonts"  # _MEIPASS: a packaged app
-FONT = '"Fuse Box Digits", "Inter 18pt", "Inter", "Segoe UI", "Helvetica Neue", Arial'
+FONT = '"Inter 18pt", "Inter", "Segoe UI", "Helvetica Neue", Arial'
 SCENE_BARS = "\n".join(f'QLineEdit#colname[scene="{i}"] {{ border-top-color: {QColor(c).darker(150).name()}; }}'
                        for i, c in enumerate(SCENE_COLORS))  # the scene colours, a third darker
 STYLE = f"""
@@ -2632,7 +2578,7 @@ class MainWindow(QMainWindow):
             sb.picked.connect(lambda state, i=i: self._pick_state(i, state))
             sb.customContextMenuRequested.connect(lambda pos, i=i, sb=sb: self._state_menu(i, sb.mapToGlobal(pos)))
             self.state_btns.append(sb)
-            om = Label("1 clip", objectName="one")
+            om = QLabel("1 clip", objectName="one")
             om.setAlignment(Qt.AlignCenter)
             om.setToolTip("This scene only acts on the clip under the playhead")
             self.one_marks.append(om)
@@ -2652,7 +2598,7 @@ class MainWindow(QMainWindow):
                                         boxed=True, icon=8.0)
         self.all_clips_box.setAttribute(Qt.WA_TransparentForMouseEvents)  # a sign, not a button
         self.all_clips_box.hide()
-        self.conn_rest = Label("", objectName="muted")
+        self.conn_rest = QLabel("", objectName="muted")
         self._has_clip = False
         f.addWidget(self.conn_dot)
         f.addWidget(self.conn_label)
@@ -2670,7 +2616,7 @@ class MainWindow(QMainWindow):
         f.addSpacing(10)
         self.conn_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         # status line: its own row, above the footer
-        self.status = Label("", objectName="flash")
+        self.status = QLabel("", objectName="flash")
         self.status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.status.setContentsMargins(self.conn_dot.width() + f.spacing(), 0, 0, 0)  # under "DR …", past the dot
         v.addWidget(self.status)
@@ -2693,7 +2639,7 @@ class MainWindow(QMainWindow):
             self.chk_focus.setToolTip("Windows only")
         f.addWidget(self.chk_focus)
         f.addSpacing(10)
-        f.addWidget(Label("Preset", objectName="muted"))
+        f.addWidget(QLabel("Preset", objectName="muted"))
         self.seg_btns = []
         for s in range(1, NUM_PRESETS + 1):
             b = QPushButton(str(s), objectName="seg", checkable=True)
@@ -2755,7 +2701,7 @@ class MainWindow(QMainWindow):
             return w
 
         def label(text, layer=False):
-            lab = temp(Label(text, objectName="rowlabel"))
+            lab = temp(QLabel(text, objectName="rowlabel"))
             lab.setProperty("layer", layer)
             lab.setFixedHeight(24)
             lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)  # like Resolve's row labels
@@ -3786,18 +3732,7 @@ def load_fonts():
 
 
 class AppStyle(QProxyStyle):
-    """Fusion, with tooltips only after resting on an item for 2 s, every time, and the words of labels and
-    buttons that hold a digit in JetBrains Mono (draw_text)."""
-
-    def drawItemText(self, p, rect, flags, pal, enabled, text, textRole=QPalette.NoRole):
-        if "\n" in text or getattr(flags, "value", flags) & Qt.TextWordWrap.value or not DIGIT_WORD.search(text):
-            super().drawItemText(p, rect, flags, pal, enabled, text, textRole)
-            return
-        p.save()
-        if textRole != QPalette.NoRole:
-            p.setPen(QPen(pal.brush(textRole), p.pen().widthF()))
-        draw_text(p, QRectF(rect), flags, text)
-        p.restore()
+    """Fusion, with tooltips only after resting on an item for 2 s, every time, and rounded see-through menus."""
 
     def polish(self, arg):
         if isinstance(arg, QMenu):  # see-through corners, so the menu's style-sheet border-radius shows
