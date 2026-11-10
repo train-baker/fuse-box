@@ -91,7 +91,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Fuse Box"
-APP_VERSION = "0.3.0 r21"
+APP_VERSION = "0.3.1 r21"
 NUM_TOGGLES = 5
 NUM_PRESETS = 3
 MAX_LAYERS = 16
@@ -2285,17 +2285,17 @@ class ArrowButton(QPushButton):
         p.translate(self.width() / 2, self.height() / 2)
         if self.redo:
             p.scale(-1, 1)
-        pen = QPen(QColor(TEXT if self.isEnabled() else TEXT_FAINT), 1.3)
+        pen = QPen(QColor(TEXT if self.isEnabled() else TEXT_FAINT), 1.5)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
         p.setPen(pen)
-        u = QPainterPath()  # ↶: a stroke heading left, out of a half-turn on the right
-        u.moveTo(-1.5, 5)
-        u.lineTo(1, 5)
-        u.arcTo(QRectF(-2.5, -3.5, 7, 7), 270, 180)  # bottom → round the right side → top
-        u.lineTo(-5, -3.5)
+        u = QPainterPath()  # ↶ drawn like SF Symbols' arrow.uturn.backward: one smooth curve, round ends
+        u.moveTo(-5, -2)
+        u.lineTo(1, -2)
+        u.cubicTo(4.2, -2, 5.5, 0.2, 5.5, 1.8)  # round the right side…
+        u.cubicTo(5.5, 3.6, 4, 5, 1.5, 5)  # …and back in, underneath
         p.drawPath(u)
-        p.drawPolyline([QPointF(-2.5, -6), QPointF(-5, -3.5), QPointF(-2.5, -1)])  # the arrowhead
+        p.drawPolyline([QPointF(-2, -5), QPointF(-5, -2), QPointF(-2, 1)])  # an open arrowhead
 
 
 class PinButton(QPushButton):
