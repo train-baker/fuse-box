@@ -37,7 +37,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
-from collections import deque
+import html
 import json
 import math
 import os
@@ -48,6 +48,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import NamedTuple
 
@@ -71,6 +72,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialogButtonBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -103,6 +105,8 @@ BG = "#28282e"          # panel
 BG_DARK = "#212126"     # headers, window frame
 BG_GRID = "#24242a"     # strip area
 BORDER = "#16161a"      # the main window's outer edge (Windows 11): BG_GRID's step-darker edge, 15 % darker
+ALERT_TITLE = "#181818"  # an alert's title bar: Windows' dark #202020, a quarter darker
+ALERT_TITLE_TEXT = "#ababab"  # its title: Windows' white, a third darker
 TITLE_TEXT = "#a6926e"  # title-bar text (Windows 11): the muted gold of a missing scene pick, 20% brighter
 TITLE_BG = "#202020"    # Windows 11's own dark title bar, for the faint circle in its icon slot
 FIELD = "#1f1f1f"       # input fields
@@ -121,6 +125,7 @@ GREEN = "#448f64"       # track colour stripe
 SCENE_COLORS = [GREEN, "#ffa833", "#9972a0", "#4376a1", "#b9af97"]
 RED = "#e64b3d"         # record
 ACTION_GOLD = "#9c7617"  # what just happened ("Scene 1 → ON …") and "Apply to all clips": ACCENT, a fifth darker
+ALERT_GOLD = "#c3941d"   # the key and commands in an alert: ACTION_GOLD a quarter brighter, same hue
 MISSING_GOLD = "#8a7a5c"  # a picked node that is no longer in the clip's node tree (italic)
 STATE_DOT = {"HOLD": "#919191", "ON": ACCENT, "OFF": RED}  # state dots, lit when picked
 
@@ -738,13 +743,6 @@ function Read-Layers($w) {
   return $out }
 """
 
-_LAYER_PS = _FIND_SETTINGS_PS + r"""
-$p = Get-Process Resolve -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $p) { exit }
-$w = Find-Settings $p
-if ($w) { 'OPEN'; (Read-Layers $w).TrimEnd() }
-"""
-
 _LAYER_WATCH_PS = "$ErrorActionPreference = 'SilentlyContinue'\n" + _FIND_SETTINGS_PS + r"""
 $parent = __PARENT__; $last = ''
 while (Get-Process -Id $parent) {
@@ -752,6 +750,7 @@ while (Get-Process -Id $parent) {
   $out = ''; $w = $null
   if ($p) { $w = Find-Settings $p; if ($w) { $out = Read-Layers $w } }
   if ($out -and $out -ne $last) { $last = $out; [Console]::Out.Write($out + "END`n"); [Console]::Out.Flush() }
+  elseif (-not $w -and $last) { $last = ''; [Console]::Out.Write("CLOSED`nEND`n"); [Console]::Out.Flush() }
   # open: look often, so the last rename is read before Save closes the window; closed: a cheap check each second
   if ($w) { Start-Sleep -Milliseconds 500 } else { Start-Sleep -Milliseconds 1000 }
 }
@@ -771,9 +770,9 @@ def _parse_layer_lines(lines) -> dict | None:
 
 
 def watch_resolve_layer_settings(emit) -> None:
-    """Background: while Resolve's Project Settings window is open, report its layer names /
-    Post Group tick whenever they change (so a rename is caught before you press Save and the
-    window closes). One hidden PowerShell process that exits by itself when this app exits."""
+    """Background: while Resolve's Project Settings window is open, report its layer names and Post Group
+    tick whenever they change (so the last ones are caught before Save closes it), and "closed" once it closes.
+    One hidden PowerShell process that exits by itself when this app exits."""
     if not IS_WIN:
         return
     ps = _LAYER_WATCH_PS.replace("__PARENT__", str(os.getpid()))
@@ -787,28 +786,13 @@ def watch_resolve_layer_settings(emit) -> None:
     for ln in proc.stdout:
         ln = ln.rstrip("\r\n")
         if ln == "END":
-            d = _parse_layer_lines(block)
+            d = "closed" if block == ["CLOSED"] else _parse_layer_lines(block)
             block = []
             if d:
                 emit(d)
         else:
             block.append(ln)
 
-
-def read_resolve_layer_settings() -> dict | None:
-    """Layer names + "Post Group Node Stack Layer" exactly as Resolve shows them in
-    Project Settings › General Options › Color. Resolve's scripting API doesn't expose these,
-    so they're read from Resolve's window (Windows UI Automation) — only possible while
-    the Project Settings window is open. None when it isn't (or not on Windows)."""
-    if not IS_WIN:
-        return None
-    try:
-        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _LAYER_PS],
-                           capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
-    except Exception:
-        return None
-    lines = r.stdout.splitlines()
-    return _parse_layer_lines(lines) if "OPEN" in lines else None
 
 
 # ----------------------------------------------------------------------------- open with Resolve
@@ -2333,7 +2317,9 @@ class LayerPill(QFrame):
 
 # The fonts/ folder ships with the app and is loaded at start (load_fonts), so Windows and macOS look the same.
 # Everything is Inter. Sizes are in px: a pt is 1/96 in on Windows but 1/72 in on macOS.
-FONTS_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "fonts"  # _MEIPASS: a packaged app
+APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))  # _MEIPASS: a packaged app
+FONTS_DIR = APP_DIR / "fonts"
+ALERT_ICON = APP_DIR / "assets" / "alert.ico"  # the alerts' sign
 FONT = '"Inter 18pt", "Inter", "Segoe UI", "Helvetica Neue", Arial'
 SCENE_BARS = "\n".join(f'QLineEdit#colname[scene="{i}"] {{ border-top-color: {QColor(c).darker(150).name()}; }}'
                        for i, c in enumerate(SCENE_COLORS))  # the scene colours, a third darker
@@ -2389,6 +2375,7 @@ QLabel#tagname[clash="true"] {{ color: #b83c31; }}  /* RED, a fifth darker */
 QLineEdit#tagedit {{ background: transparent; border: none; padding: 0 7px 0 8px; color: {TEXT}; }}
 QPushButton#pin {{ padding: 0; }}
 QPushButton#seg {{ padding: 2px 0; min-width: 20px; max-width: 20px; }}
+QPushButton#seg[sel="true"]:!checked {{ background: {FIELD}; }}  /* picked, scenes differ from it; blue: they match */
 QCheckBox {{ spacing: 6px; color: {TEXT_DIM}; }}
 QCheckBox::indicator {{ width: 11px; height: 11px; border-radius: 3px; border: 1px solid transparent; background: {BTN}; }}
 QCheckBox::indicator:checked {{ background: {BLUE}; border-color: transparent; }}
@@ -2400,7 +2387,7 @@ QMenu::item:disabled {{ color: {TEXT_FAINT}; }}
 QMenu::separator {{ height: 1px; background: #1c1c20; margin: 4px 2px; }}  /* the grid divider's contrast on the menu */
 QMenu::indicator {{ width: 11px; height: 11px; border-radius: 3px; border: 1px solid transparent; background: {BTN}; margin-left: 4px; }}
 QMenu::indicator:checked {{ background: {BLUE}; }}
-QToolTip {{ background: {BG_DARK}; color: {TEXT}; border: 1px solid {BTN}; padding: 4px 6px; }}
+QToolTip {{ background: {FIELD}; color: {TEXT_DIM}; border: none; border-radius: 6px; padding: 2px 4px; }}  /* like the cells; text like the checkboxes */
 """
 
 
@@ -2453,6 +2440,9 @@ class MainWindow(QMainWindow):
         self.pills: dict[str, LayerPill] = {}
         self._grid_widgets: list[QWidget] = []
         self._layers = 1
+        self._pending_layers = None  # names / Post Group read from an open Project Settings, applied once it closes
+        self.seg_btns: list[QPushButton] = []  # preset numbers (built with the footer; save() may run before)
+        self._scenes_seen = None  # the scenes as last compared with the selected preset
         self._proj_key = None
         self.rkeys = ResolveShortcuts()
         self.rkeys.load()
@@ -2477,11 +2467,8 @@ class MainWindow(QMainWindow):
         self._main_wanted = not standby  # standby: hotkeys only, the window opens from Resolve's Scripts menu
         self.resolve_windows.connect(self._on_resolve_windows, Qt.QueuedConnection)
         self.layer_settings.connect(self._apply_layer_settings, Qt.QueuedConnection)
-        self._layer_read_busy = False
-        self._layer_read_at = 0.0
         if not demo:
-            QTimer.singleShot(1500, self._read_layers)
-            threading.Thread(target=watch_resolve_layer_settings, args=(self._layer_watch_emit,), daemon=True).start()
+            threading.Thread(target=watch_resolve_layer_settings, args=(self.layer_settings.emit,), daemon=True).start()
         self.watch = ResolveWatch(self._resolve_closed, self._resolve_windows_thread, ignore_pid)
         self._native = [int(self.winId())]  # for hiding from the watcher thread
         if demo or (self.watch.running() and not standby):
@@ -2593,7 +2580,7 @@ class MainWindow(QMainWindow):
         f.setSpacing(6)
         self.conn_dot = StateDot(7)
         self.conn_label = TailLabel("Connecting…", objectName="muted")  # takes the room left; the clip name ends it
-        # "DR 21 · clip [+] · 3 layers": the + box (every other clip too) sits right after the clip name
+        # "DR 21 · clip [+] (group)": the + box (every other clip too) sits right after the clip name
         self.all_clips_box = IconButton("plus", "…and every other enabled clip in the timeline", 12, 12,
                                         boxed=True, icon=8.0)
         self.all_clips_box.setAttribute(Qt.WA_TransparentForMouseEvents)  # a sign, not a button
@@ -2653,7 +2640,8 @@ class MainWindow(QMainWindow):
         f.addWidget(self.btn_save)
         f.addWidget(self.btn_load)
         v.addLayout(f)
-        self._pick_preset("1")
+        # at launch: the preset the scenes match is selected (blue); none → 1
+        self._pick_preset(next((s for s in self.cfg["presets"] if self._matches_preset(s)), "1"))
 
         self.setCentralWidget(root)
         self._flash_timer = QTimer(self)
@@ -2793,7 +2781,6 @@ class MainWindow(QMainWindow):
             self._drop_missing()
         else:
             self.try_connect()
-        self._read_layers()
 
     def _drop_missing(self):
         """Refresh: forget the picks that are no longer in the clip's node tree (where the tree could be read)."""
@@ -2817,28 +2804,13 @@ class MainWindow(QMainWindow):
             self._refresh_tags()
             self.flash(f"Refresh: removed {dropped} pick{'s' if dropped != 1 else ''} no longer on this clip")
 
-    def _read_layers(self):
-        """Copy Resolve's layer names / Post Group setting (background thread, see read_resolve_layer_settings)."""
-        if self.demo or self._layer_read_busy:
-            return
-        self._layer_read_busy = True
-        self._layer_read_at = time.monotonic()
-
-        def work():
-            try:
-                self.layer_settings.emit(read_resolve_layer_settings())
-            except Exception:
-                self.layer_settings.emit(None)
-        threading.Thread(target=work, daemon=True).start()
-
-    def _layer_watch_emit(self, d):
-        self.layer_settings.emit(("watch", d))
-
     def _apply_layer_settings(self, d):
-        if isinstance(d, tuple):  # from the background watcher, not a Refresh read
-            d = d[1]
-        else:
-            self._layer_read_busy = False
+        """From the watcher: Project Settings' layer names / Post Group while it's open (held), then "closed"
+        (applied: nothing changes while it's open)."""
+        if d != "closed":
+            self._pending_layers = d
+            return
+        d, self._pending_layers = self._pending_layers, None
         if not d:
             return
         old = self.cfg["layer_names"]
@@ -2853,12 +2825,6 @@ class MainWindow(QMainWindow):
         self.save()
         self._rows = []  # rebuild so rows and layer pills show the new names / order
         self._show_nodes(self._rows_for(self._layers))
-
-    def changeEvent(self, e):  # coming back from Resolve's Project Settings: pick up renamed layers
-        super().changeEvent(e)
-        if e.type() == e.Type.ActivationChange and self.isActiveWindow() \
-                and time.monotonic() - self._layer_read_at > 3:
-            self._read_layers()
 
     def _keys_hint(self):
         st = self.rkeys.status
@@ -2884,11 +2850,33 @@ class MainWindow(QMainWindow):
         more = f" and {len(hits) - 3} more" if len(hits) > 3 else ""
         box = QMessageBox(self)
         box.setWindowTitle("Shortcut already used by Resolve")
-        box.setIcon(QMessageBox.Warning)
-        box.setText(f"{hk['text']} is also Resolve's “{'”, “'.join(hits[:3])}”{more}.")
-        box.setInformativeText(f"If you give it to {who}, both will fire when you press it.")
+        box.setStyleSheet("QLabel { font-size: 12px; }")  # a step up from the window's 11px
+        box.setIconPixmap(QIcon(str(ALERT_ICON)).pixmap(QSize(32, 32), self.devicePixelRatioF()))
+        QTimer.singleShot(0, lambda: alert_title_bar(box))  # once it's on screen
+
+        def gold(t: str) -> str:  # the key and Resolve's commands
+            return f'<span style="color:{ALERT_GOLD}">{html.escape(t)}</span>'
+
+        def para(t: str) -> str:  # a little more room between the lines of a wrapped sentence
+            return f'<p style="line-height:125%; margin:0">{t}</p>'
+
+        box.setTextFormat(Qt.RichText)
+        box.setText(para(f"{gold(hk['text'])} is also Resolve's {', '.join(f'“{gold(h)}”' for h in hits[:3])}"
+                         f"{html.escape(more)}."))
+        box.setInformativeText(para(f"If you give it to {html.escape(who)}, both will fire when you press it."))
         keep = box.addButton("Use anyway", QMessageBox.AcceptRole)
         box.addButton("Pick another", QMessageBox.RejectRole)
+        lay = box.layout()
+        lay.setContentsMargins(18, 13, 18, 12)  # room between the border and everything in it (the sign's top)
+        lay.setVerticalSpacing(4)  # the two lines of text closer together
+        lay.setHorizontalSpacing(2)  # the sign close to the text
+        if icon := box.findChild(QLabel, "qt_msgboxex_icon_label"):
+            icon.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+            lay.setAlignment(icon, Qt.AlignTop)
+        if text := box.findChild(QLabel, "qt_msgbox_label"):
+            text.setContentsMargins(0, 3, 0, 0)  # the text starts 3px below the sign's top
+        if buttons := box.findChild(QDialogButtonBox):
+            buttons.setContentsMargins(0, 8, 0, 0)  # a clear gap above the buttons (the line height adds some)
         box.exec()
         return box.clickedButton() is keep
 
@@ -2939,6 +2927,7 @@ class MainWindow(QMainWindow):
 
     def save(self):
         save_config(self.cfg, self.demo)
+        self._sync_preset()  # every change comes through here: blue / grey preset number
 
     def _bind(self):
         b = [(i, t.get("hotkey")) for i, t in enumerate(self.cfg["toggles"])]
@@ -3248,11 +3237,9 @@ class MainWindow(QMainWindow):
             hwnd, dwm = int(self.winId()), ctypes.windll.dwmapi
             dark = ctypes.c_int(1)
             dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), 4)  # DWMWA_USE_IMMERSIVE_DARK_MODE
-            c = QColor(BORDER)
-            edge = ctypes.c_uint(c.red() | c.green() << 8 | c.blue() << 16)  # COLORREF is 0x00BBGGRR
+            edge = ctypes.c_uint(colorref(BORDER))
             dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(edge), 4)  # DWMWA_BORDER_COLOR; Windows 10 ignores it
-            t = QColor(TITLE_TEXT)
-            text = ctypes.c_uint(t.red() | t.green() << 8 | t.blue() << 16)
+            text = ctypes.c_uint(colorref(TITLE_TEXT))
             dwm.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(text), 4)  # DWMWA_TEXT_COLOR; Windows 10 ignores it
             # WTA_OPTIONS: WTNCA_NOSYSMENU — no system menu, but the icon slot stays (Windows strips leading
             # spaces, so this is what insets the title): a faint circle in it, a shade lighter than the bar
@@ -3452,9 +3439,13 @@ class MainWindow(QMainWindow):
             proj, tl, item = self.bridge.context()
             graphs = self.bridge.graphs(proj, tl, item)
             grp = _safe(item.GetColorGroup) if item else None
+            # the saved layer count (it changes on Save only), every time: Resolve may apply it after its window closes
+            saved_layers = _safe(proj.GetSetting, "nodeStackLayers") if proj else None
+            pname, tname = (proj.GetName() if proj else None), (tl.GetName() if tl else None)
             sig = (
-                proj.GetName() if proj else None,
-                tl.GetName() if tl else None,
+                saved_layers,
+                pname,
+                tname,
                 _safe(item.GetUniqueId) if item else None,
                 _safe(grp.GetName) if grp else None,
                 tuple((k, _safe(g.GetNumNodes) if g else None) for k, g in sorted(graphs.items())),
@@ -3470,8 +3461,8 @@ class MainWindow(QMainWindow):
 
         self.conn_dot.set_state(True)
         clip_layers = sum(1 for k in graphs if slot_layer(k))
-        try:  # Resolve's Project Settings › Node Stack Layers is the reference for the rows
-            layers = int(_safe(proj.GetSetting, "nodeStackLayers") or 0) if proj else 0
+        try:  # Resolve's Project Settings › Node Stack Layers, as saved, is the reference for the rows
+            layers = int(saved_layers or 0)
         except (TypeError, ValueError):
             layers = 0
         layers = layers or clip_layers or 1
@@ -3484,14 +3475,14 @@ class MainWindow(QMainWindow):
         if item:
             gname = _safe(grp.GetName) if grp else None
             parts.append(item.GetName())  # last, so a shortened line still ends with the clip name's end
-            rest = (f"({gname})  " if gname else "") + f"·  {layers} layer{'s' if layers != 1 else ''}"
+            rest = f"({gname})" if gname else ""
         elif tl:
             parts.append("no clip under playhead")
         self._has_clip = bool(item)
         self.conn_label.setText("  ·  ".join(parts))
         self.conn_rest.setText(rest)
         self._sync_all_clips_box()
-        self.conn_label.setToolTip(f"{proj.GetName() if proj else ''}  /  {tl.GetName() if tl else ''}")
+        self.conn_label.setToolTip(f"{pname or ''}  /  {tname or ''}")
 
         no_clip = "No clip under playhead"
         self._reasons = {"preclip": "Clip has no color group" if item else no_clip,
@@ -3685,13 +3676,36 @@ class MainWindow(QMainWindow):
         else:  # nothing matched: leave the label's state alone
             self.flash(f"No nodes labelled “{tag['name']}” found on enabled clips — check the spelling in Resolve")
 
+    def _scenes(self) -> list[dict]:
+        """The scenes as a preset holds them: names, keys, node picks; not their ON/OFF."""
+        return [clean_toggle(i, t) for i, t in enumerate(self.cfg["toggles"])]
+
+    def _matches_preset(self, slot: str) -> bool:
+        data = self.cfg["presets"].get(slot)
+        return bool(data) and self._scenes() == \
+            [clean_toggle(i, data[i] if i < len(data) else {}) for i in range(NUM_TOGGLES)]
+
     def _pick_preset(self, slot: str):
+        """Select slot for Save / Load: its number is blue while the scenes match what it holds, dark (FIELD)
+        once anything differs; the other numbers stay grey."""
         self.preset_slot = slot
+        match = self._matches_preset(slot)
         for b in self.seg_btns:
-            b.setChecked(b.text() == slot)
+            chosen = b.text() == slot
+            b.setChecked(match and chosen)
+            b.setProperty("sel", chosen)
+            repolish(b)
         has = bool(self.cfg["presets"].get(slot))
         self.btn_load.setEnabled(has)
         self.btn_load.setToolTip(f"Load preset {slot}" if has else f"Preset {slot} is empty")
+
+    def _sync_preset(self):
+        if not self.seg_btns:
+            return
+        scenes = self._scenes()
+        if scenes != self._scenes_seen:  # a scene firing (ON / OFF) changes nothing here
+            self._scenes_seen = scenes
+            self._pick_preset(self.preset_slot)
 
     def save_preset(self, slot: str):
         self.cfg["presets"][slot] = [{**copy.deepcopy(t), "on": None} for t in self.cfg["toggles"]]
@@ -3725,6 +3739,24 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
 
+def colorref(colour: str) -> int:
+    """A Windows COLORREF (0x00BBGGRR) for a "#rrggbb" colour."""
+    c = QColor(colour)
+    return c.red() | c.green() << 8 | c.blue() << 16
+
+
+def alert_title_bar(w: QWidget) -> None:
+    """An alert's title bar: no icon (or system menu), WTNCA_NODRAWICON | WTNCA_NOSYSMENU, and ALERT_TITLE /
+    ALERT_TITLE_TEXT as its colours (Windows 11; Windows 10 keeps its own)."""
+    if IS_WIN:
+        import ctypes
+        hwnd = int(w.winId())
+        flags = (ctypes.c_uint * 2)(0x6, 0x6)  # (flags, mask)
+        ctypes.windll.uxtheme.SetWindowThemeAttribute(hwnd, 1, flags, ctypes.sizeof(flags))  # WTA_NONCLIENT
+        for attr, colour in ((35, ALERT_TITLE), (36, ALERT_TITLE_TEXT)):  # DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(ctypes.c_uint(colorref(colour))), 4)
+
+
 def load_fonts():
     """Register the bundled fonts (fonts/*.ttf) for this run; nothing is installed on the system."""
     for f in sorted(FONTS_DIR.glob("*.ttf")):
@@ -3732,10 +3764,12 @@ def load_fonts():
 
 
 class AppStyle(QProxyStyle):
-    """Fusion, with tooltips only after resting on an item for 2 s, every time, and rounded see-through menus."""
+    """Fusion, with tooltips only after resting on an item for 2 s, every time, and rounded see-through menus
+    and tooltips."""
 
     def polish(self, arg):
-        if isinstance(arg, QMenu):  # see-through corners, so the menu's style-sheet border-radius shows
+        if isinstance(arg, QMenu) or (isinstance(arg, QWidget) and arg.inherits("QTipLabel")):  # see-through
+            # corners, so the style sheet's border-radius shows
             arg.setAttribute(Qt.WA_TranslucentBackground)
             arg.setWindowFlag(Qt.FramelessWindowHint)
             arg.setWindowFlag(Qt.NoDropShadowWindowHint)

@@ -57,7 +57,7 @@ jobs:
           sep=":"; [ "$RUNNER_OS" = Windows ] && sep=";"  # --add-data's separator
           common=(--noconfirm --hidden-import mock_resolve --hidden-import ${{ matrix.backend }}
                   --hidden-import importlib.machinery --hidden-import importlib.util
-                  --add-data "fonts${sep}fonts")  # the bundled Inter fonts
+                  --add-data "fonts${sep}fonts" --add-data "assets${sep}assets")  # Inter, the alert sign
           mkdir -p out
           case "$RUNNER_OS" in
             Windows)
