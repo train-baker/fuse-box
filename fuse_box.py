@@ -93,7 +93,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Fuse Box"
-APP_VERSION = "0.3.1 r21"
+APP_VERSION = "0.3.3 r21"
 NUM_TOGGLES = 5
 NUM_PRESETS = 3
 MAX_LAYERS = 16
@@ -2605,8 +2605,11 @@ class MainWindow(QMainWindow):
         # status line: its own row, above the footer
         self.status = QLabel("", objectName="flash")
         self.status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.status.setContentsMargins(self.conn_dot.width() + f.spacing(), 0, 0, 0)  # under "DR …", past the dot
-        v.addWidget(self.status)
+        self.status.setContentsMargins(self.conn_dot.width() + f.spacing(), 5, 0, 0)  # under "DR …", past the dot
+        bottom = QVBoxLayout()  # status and footer: the status 5px lower, its gap to the footer 5px shorter
+        bottom.setSpacing(v.spacing() - 5)
+        bottom.addWidget(self.status)
+        v.addLayout(bottom)
         self.chk_script = QCheckBox("Script Shortcut")
         self.chk_script.setChecked(_script_shortcut_file().exists() if not self.demo else False)
         if self.chk_script.isChecked():  # point it at this copy, in case the app was moved, renamed or packaged
@@ -2639,7 +2642,7 @@ class MainWindow(QMainWindow):
         self.btn_load.clicked.connect(lambda: self.load_preset(self.preset_slot))
         f.addWidget(self.btn_save)
         f.addWidget(self.btn_load)
-        v.addLayout(f)
+        bottom.addLayout(f)
         # at launch: the preset the scenes match is selected (blue); none → 1
         self._pick_preset(next((s for s in self.cfg["presets"] if self._matches_preset(s)), "1"))
 

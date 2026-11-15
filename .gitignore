@@ -16,3 +16,6 @@ Thumbs.db
 
 # Font sources; the app ships only fonts/
 Fontbook/
+
+# Icon packs the app icons were picked from; the app ships only assets/
+icons/

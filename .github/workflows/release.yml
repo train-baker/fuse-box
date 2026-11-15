@@ -122,7 +122,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: Fuse Box ${{ github.ref_name }}
-          prerelease: true
+          prerelease: false  # a full release: GitHub marks the newest one "Latest"
           files: out/*
           body: |
             Stand-alone builds of Fuse Box (no Python needed), built with Python 3.12.
