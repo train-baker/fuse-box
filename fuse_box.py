@@ -1587,34 +1587,42 @@ class _MissingRow(QWidget):
 class DotAction(QWidgetAction):
     """A menu item with a status dot on its right, drawn like the connection dot (glow and all)."""
 
-    def __init__(self, text: str, color: QColor | None, menu: QMenu):
+    def __init__(self, text: str, color: QColor | None, menu: QMenu, widest: str = ""):
         super().__init__(menu)
         self.setText(text)
-        row = _DotRow(self, text, color, menu)
-        self.setDefaultWidget(row)
-        menu.hovered.connect(lambda _a: row.update())
+        self.row = _DotRow(self, text, color, menu, widest)
+        self.setDefaultWidget(self.row)
+        menu.hovered.connect(lambda _a: self.row.update())
+
+    def show_state(self, text: str, color: QColor | None, clickable: bool):
+        """Change it while the menu is open; only a clickable one highlights and can be picked."""
+        self.setText(text)
+        self.setEnabled(clickable)
+        self.row.text, self.row.color = text, color
+        self.row.update()
 
 
 class _DotRow(QWidget):
     DOT = 7
 
-    def __init__(self, action: QWidgetAction, text: str, color: QColor | None, menu: QMenu):
+    def __init__(self, action: QWidgetAction, text: str, color: QColor | None, menu: QMenu, widest: str = ""):
         super().__init__()
         self.action, self.text, self.color, self.menu = action, text, color, menu
+        self.widest = widest or text  # room for the longest text it may switch to while open
         self.setAttribute(Qt.WA_TransparentForMouseEvents)  # the menu itself handles hover and click
 
     def sizeHint(self):
-        return QSize(_MissingRow.TEXT_X + math.ceil(text_width(self.font(), self.text)) + 40, 22)
+        return QSize(_MissingRow.TEXT_X + math.ceil(text_width(self.font(), self.widest)) + 20, 22)
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        if self.menu.activeAction() is self.action:  # QMenu::item:selected
+        if self.menu.activeAction() is self.action and self.action.isEnabled():  # QMenu::item:selected
             p.setBrush(QColor(MENU_HOVER))
             p.drawRoundedRect(QRectF(self.rect()), 5, 5)
-        if self.color is not None:  # the dot, right-aligned
-            d, x, y = self.DOT, self.width() - self.DOT - 10, (self.height() - self.DOT) / 2
+        if self.color is not None:  # the dot, where the other items have their tick box
+            d, x, y = self.DOT, 5 + (11 - self.DOT) / 2, (self.height() - self.DOT) / 2
             glow = QColor(self.color)
             glow.setAlpha(60)
             p.setBrush(glow)
@@ -1673,6 +1681,10 @@ class StickyMenu(QMenu):
             e.accept()
             return
         a = self.activeAction()
+        if a is not None and a.isEnabled() and getattr(a, "in_place", None):  # acts without closing the menu
+            a.in_place()  # (triggering a widget action would make QMenu hide)
+            e.accept()
+            return
         if a is not None and a.isEnabled() and a.isCheckable():
             a.trigger()
             e.accept()
@@ -2705,6 +2717,7 @@ class MainWindow(QMainWindow):
         if not demo:
             threading.Thread(target=watch_resolve_layer_settings, args=(self.layer_settings.emit,), daemon=True).start()
         self._release = None  # latest_release(), once checked
+        self._checking, self._update_row = False, None  # a check under way; the Settings menu's row while open
         self.update_checked.connect(self._on_update_checked, Qt.QueuedConnection)
         if not demo:
             self._check_updates()
@@ -3645,19 +3658,10 @@ class MainWindow(QMainWindow):
             return  # this click on the button just closed the menu: leave it closed
         m = StickyMenu(self)
         m.setToolTipsVisible(True)
-        rel = self._release
-        if rel and rel["newer"]:
-            a = DotAction("Update Release", QColor(ACCENT), m)
-            a.setToolTip(f"{APP_NAME} {rel['version']} is out (you have {APP_VERSION})")
-            a.triggered.connect(self._update_release)
-        elif rel:
-            a = DotAction("Running Latest Release", CONN_COLOR, m)
-            a.setToolTip(f"{APP_NAME} {APP_VERSION} is the latest release")
-        else:
-            a = DotAction("Check for Updates", QColor("#1f1f1f"), m)
-            a.setToolTip("Couldn't reach GitHub at start: check again")
-            a.triggered.connect(lambda: self._check_updates(report=True))
-        m.addAction(a)
+        self._update_row = DotAction("", None, m, widest=max(self.UPDATE_TEXTS, key=len))
+        self._update_row.triggered.connect(self._update_row_clicked)
+        self._show_update_row()
+        m.addAction(self._update_row)
         m.addSeparator()
         items = [("Script Shortcut", self.cfg["script_shortcut"], self._set_script_shortcut,
                   f"Add _{APP_NAME} to Resolve's Workspace › Scripts menu, a second way to open {APP_NAME}"),
@@ -3674,11 +3678,43 @@ class MainWindow(QMainWindow):
         size = m.sizeHint()
         m.exec(b.mapToGlobal(QPoint(b.width() - size.width(), -size.height() - 2)))
         self._settings_closed = time.monotonic()
+        self._update_row = None
         m.deleteLater()
 
-    def _check_updates(self, report: bool = False):
-        """Ask GitHub for the latest release, in the background (at every start; again from Settings)."""
-        self._report_update = report
+    UPDATE_TEXTS = ("Update Release", "Running Latest Release", "Checking for Updates…", "Check for Updates")
+
+    def _update_row_clicked(self):
+        if self._release and self._release["newer"]:
+            self._update_release()
+        elif not self._checking:  # "Check for Updates": ask now; the menu stays open and shows the answer
+            self._check_updates()
+            self._show_update_row()
+
+    def _show_update_row(self):
+        """The Settings menu's first row: "Update Release" and "Check for Updates" can be clicked; "Running Latest
+        Release" and "Checking for Updates…" just tell."""
+        row, rel = self._update_row, self._release
+        if row is None:
+            return
+        dark = QColor("#1f1f1f")
+        row.in_place = None if rel else self._update_row_clicked  # checking keeps the menu open; updating closes it
+        if rel and rel["newer"]:
+            row.show_state("Update Release", QColor(ACCENT), True)
+            row.setToolTip(f"{APP_NAME} {rel['version']} is out (you have {APP_VERSION})")
+        elif rel:
+            row.show_state("Running Latest Release", CONN_COLOR, False)
+            row.setToolTip(f"{APP_NAME} {APP_VERSION} is the latest release")
+        elif self._checking:
+            row.show_state("Checking for Updates…", dark, False)
+            row.setToolTip("Asking GitHub for the latest release")
+        else:
+            row.show_state("Check for Updates", dark, True)
+            row.setToolTip("Couldn't reach GitHub (offline, or the repository isn't public): ask again")
+
+    def _check_updates(self):
+        """Ask GitHub for the latest release, in the background: at every start, and when Settings opens after a
+        failed check."""
+        self._checking = True
 
         def run():
             try:
@@ -3691,12 +3727,10 @@ class MainWindow(QMainWindow):
         threading.Thread(target=run, daemon=True).start()
 
     def _on_update_checked(self, rel):
-        self._release = rel
+        self._release, self._checking = rel, False
+        self._show_update_row()  # Settings open: its row changes in place
         if rel and rel["newer"]:
             self.flash(f"{APP_NAME} {rel['version']} is out: Settings › Update Release", 8000)
-        elif self._report_update:
-            self.flash(f"{APP_NAME} {APP_VERSION} is the latest release" if rel else
-                       "Couldn't reach GitHub to check for updates")
 
     def _update_release(self):
         """Download only the files that changed in the latest release, put them in place, restart."""
