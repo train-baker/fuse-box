@@ -6,18 +6,19 @@ Fuse Box (formerly Node Toggle) — switch DaVinci Resolve color nodes on and of
   * each toggle can hold nodes from Pre-Group, every clip layer (L1, L2, L3 …),
     Post-Group and Timeline — or a whole layer at once
   * scenes, layer keys and node labels act on the clip under the playhead; tick "Apply to all clips in
-    the Timeline" for every enabled clip (right-click a scene or layer key for "This clip only")
-  * layer shortcuts: one key per layer / group to switch it off and on whole
+    the Timeline" for every enabled clip (right-click a scene key for "This clip only")
+  * layer states: ON / OFF switch a layer / group whole over the scenes (one key each), HOLD puts the
+    scenes' and node labels' states back
   * node labels: type a Resolve node label (e.g. NR); it starts on HOLD (grey dot), its ON / OFF dots
     switch every node with that label on every layer; turns red when a scene picks the same nodes
     with the opposite state
-  * turning a layer / group back ON keeps nodes off that should stay off
+  * a layer's HOLD, and "Entire layer" picks switched back ON, keep nodes off that should stay off
     (OFF node labels and nodes picked in OFF scenes)
   * warns when a key you assign is already a Resolve shortcut (reads your active
     custom keyboard preset)
   * node picker: click and drag over nodes to tick or untick several at once
   * 3 preset slots
-  * "Script Shortcut": adds _Fuse Box to Resolve's Workspace > Scripts menu, a second way to open it;
+  * Settings › "Script Shortcut" (on by default): adds _Fuse Box to Resolve's Workspace > Scripts menu, a second way to open it;
     a second launch just brings the open window forward
 
 Requirements: DaVinci Resolve Studio 19.1+ with
@@ -52,10 +53,11 @@ from collections import deque
 from pathlib import Path
 from typing import NamedTuple
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
+    QDesktopServices,
     QFont,
     QFontDatabase,
     QFontMetrics,
@@ -94,7 +96,7 @@ from PySide6.QtWidgets import (
 
 APP_NAME = "Fuse Box"
 APP_VERSION = "0.3.3 r21"
-NUM_TOGGLES = 5
+NUM_TOGGLES = 4
 NUM_PRESETS = 3
 MAX_LAYERS = 16
 IS_WIN = sys.platform.startswith("win")
@@ -113,6 +115,7 @@ FIELD = "#1f1f1f"       # input fields
 EDGE = "#18181c"        # outline of the grid box, grid dividers
 BTN = "#3b3b3f"         # buttons (R / S / M, In)
 BTN_HOVER = "#46464b"
+MENU_HOVER = "#343440"  # hsl(240, 7%, 22%): the highlighted item in a menu (Settings, a scene's node list)
 TEXT = "#b8b8ba"        # names
 TEXT_DIM = "#8e9092"    # row labels
 TEXT_FAINT = "#5a5a60"  # empty / disabled
@@ -122,11 +125,11 @@ ACCENT = "#c3931d"      # Resolve orange (bus names, active)
 BLUE = "#2d4f6b"        # selection: the Scene 4 bar's blue
 GREEN = "#448f64"       # track colour stripe
 # the bar over each scene name, Resolve clip colours: Green, Apricot, Purple, Blue, Tan
-SCENE_COLORS = [GREEN, "#ffa833", "#9972a0", "#4376a1", "#b9af97"]
+SCENE_COLORS = [GREEN, "#ffa833", "#9972a0", "#4376a1"]
 RED = "#e64b3d"         # record
 ACTION_GOLD = "#9c7617"  # what just happened ("Scene 1 → ON …") and "Apply to all clips": ACCENT, a fifth darker
 ALERT_GOLD = "#c3941d"   # the key and commands in an alert: ACTION_GOLD a quarter brighter, same hue
-MISSING_GOLD = "#8a7a5c"  # a picked node that is no longer in the clip's node tree (italic)
+CLASH_TEXT = "#b83c31"  # RED, a fifth darker: a Node Label set against a scene, a picked node gone (italic)
 STATE_DOT = {"HOLD": "#919191", "ON": ACCENT, "OFF": RED}  # state dots, lit when picked
 
 ON_COLOR = QColor(ACCENT)
@@ -202,11 +205,13 @@ def default_config() -> dict:
         "toggles": [default_toggle(i) for i in range(NUM_TOGGLES)],
         "presets": {str(i + 1): None for i in range(NUM_PRESETS)},
         "focus_only": True,
+        "script_shortcut": True,  # _Fuse Box in Resolve's Workspace › Scripts menu
         "post_layer": True,   # mirrors Resolve's "Post Group Node Stack Layer" (not readable by scripts)
         "pinned": False,      # keep the main window above Resolve
         "window": {"x": None, "y": None},  # main window position, restored next launch
-        "layer_keys": {},     # slot or "tags" -> {"hotkey", "on", "one_clip"}
-        "tags": [],           # node labels: {"name", "on": True|False|None (HOLD), "scope": "F"|"P", "project"}
+        "layer_keys": {},     # slot -> {"hotkey", "on"}
+        "tags": [],           # node labels: {"name", "on": True|False|None (HOLD), "scope": "F"|"P", "project",
+                              #               "hotkey"}
         "layer_names": {},    # "1" -> "--- L1" (Resolve's layer names aren't readable by scripts)
     }
 
@@ -230,14 +235,14 @@ def load_config(demo: bool) -> dict:
         cfg["toggles"][i] = clean_toggle(i, t)
     cfg["presets"].update({k: v for k, v in data.get("presets", {}).items() if k in cfg["presets"]})
     cfg["focus_only"] = bool(data.get("focus_only", True))
+    cfg["script_shortcut"] = bool(data.get("script_shortcut", True))
     cfg["post_layer"] = bool(data.get("post_layer", True))
     cfg["pinned"] = bool(data.get("pinned", False))
     if isinstance(data.get("window"), dict):
         cfg["window"].update({k: data["window"].get(k) for k in ("x", "y")})
     lk = data.get("layer_keys", {})
     if isinstance(lk, dict):
-        cfg["layer_keys"] = {k: {"hotkey": v.get("hotkey"), "on": None,
-                                 "one_clip": bool(v.get("one_clip", False))}
+        cfg["layer_keys"] = {k: {"hotkey": v.get("hotkey"), "on": None}
                              for k, v in lk.items() if isinstance(v, dict) and SLOT_RE.match(k)}
     names = data.get("layer_names", {})
     if isinstance(names, dict):
@@ -245,7 +250,8 @@ def load_config(demo: bool) -> dict:
     tags = data.get("tags", [])
     if isinstance(tags, list):
         cfg["tags"] = [{"name": str(t["name"]), "on": None, "scope": "F" if t.get("scope") == "F" else "P",
-                        "project": t.get("project")} for t in tags if isinstance(t, dict) and t.get("name")]
+                        "project": t.get("project"), "hotkey": t.get("hotkey")}
+                       for t in tags if isinstance(t, dict) and t.get("name")]
     return cfg
 
 
@@ -376,29 +382,59 @@ def drx_node_states(xml: str) -> list[tuple]:
     out = []
     for hexblob in re.findall(r"<Body>([0-9a-fA-F]+)</Body>", xml):
         raw = bytes.fromhex(hexblob)
-        data = _zstd(raw[1:] if raw[:1] == b"\x81" else raw)
-        top = _pb_parse(data)
+        top = _pb_parse(_zstd(raw[1:] if raw[:1] == b"\x81" else raw))
         if not top or top[0][1] != 2:
             continue
         for f, t, v in _pb_parse(top[0][2]):
-            if f != 7 or t != 2:
+            if f == 7 and t == 2:
+                _number, label, on = _drx_node_state(_pb_parse(v))
+                if on is not None:
+                    out.append((label, on))
+    return out
+
+
+def _drx_node_state(fields) -> tuple[int, str, bool | None]:
+    """(node number, label, on) from a node record of a .drx grade."""
+    number = next((v for f, t, v in fields if f == 2 and t == 0), 0)
+    label = next((v.decode("utf-8", "replace") for f, t, v in fields if f == 6 and t == 2), "")
+    on = None
+    for f, t, v in fields:
+        if f != 10 or t != 2:
+            continue
+        for pf, pt, pv in _pb_parse(v):
+            if pf != 1 or pt != 2:
                 continue
-            fields = _pb_parse(v)
-            label = next((vv.decode("utf-8", "replace") for ff, tt, vv in fields if ff == 6 and tt == 2), "")
-            on = None
-            for ff, tt, vv in fields:
-                if ff != 10 or tt != 2:
-                    continue
-                for pf, pt, pv in _pb_parse(vv):
-                    if pf != 1 or pt != 2:
-                        continue
-                    sub = _pb_parse(pv)
-                    if any(sf == 1 and sv == DRX_ENABLE_PARAM for sf, st, sv in sub):
-                        val = next((sv for sf, st, sv in sub if sf == 2 and st == 2), b"")
-                        flag = next((x for xf, _, x in _pb_parse(val) if xf == 2), 0)
-                        on = flag != 0
-            if on is not None:
-                out.append((label, on))
+            sub = _pb_parse(pv)
+            if any(sf == 1 and sv == DRX_ENABLE_PARAM for sf, st, sv in sub):
+                val = next((sv for sf, st, sv in sub if sf == 2 and st == 2), b"")
+                on = next((x for xf, _, x in _pb_parse(val) if xf == 2), 0) != 0
+    return number, label, on
+
+
+def drx_graph_states(xml: str) -> dict[str, dict[int, bool]]:
+    """{"clip:1": {node number: on}, "clip:2": …, "timeline": …} from a still's .drx: its first grade is the clip
+    (layer 1 at the top, layers 2+ in field 5 with their number in field 1), the second the timeline."""
+    out = {}
+    for n, hexblob in enumerate(re.findall(r"<Body>([0-9a-fA-F]+)</Body>", xml)[:2]):
+        raw = bytes.fromhex(hexblob)
+        top = _pb_parse(_zstd(raw[1:] if raw[:1] == b"\x81" else raw))
+        if not top or top[0][1] != 2:
+            continue
+        grades = [("timeline" if n else "clip:1", top[0][2])]
+        if not n:  # the clip's other layers
+            for f, t, v in top:
+                if f == 5 and t == 2:
+                    layer = next((x for xf, xt, x in _pb_parse(v) if xf == 1 and xt == 0), 0)
+                    grades.append((f"clip:{layer}", v))
+        for slot, grade in grades:
+            nodes = {}
+            for f, t, v in _pb_parse(grade):
+                if f == 7 and t == 2:
+                    number, _label, on = _drx_node_state(_pb_parse(v))
+                    if number and on is not None:
+                        nodes[number] = on
+            if nodes:
+                out[slot] = nodes
     return out
 
 
@@ -528,9 +564,29 @@ class ResolveBridge:
             item = tl.GetCurrentVideoItem() if tl else None
             graphs = (list(self.layer_graphs(item, proj)) if item else []) + ([tl.GetNodeGraph()] if tl else [])
             return [(n["label"], n["enabled"]) for g in graphs for n in getattr(g, "nodes", [])]
+        xml = self._still_grade(proj, tl)
+        return drx_node_states(xml) if xml else None
+
+    def graph_states(self, proj, tl) -> dict[str, dict[int, bool]] | None:
+        """Real on/off of the current clip's layers and the timeline, by node number (see drx_graph_states);
+        pre- / post-group graphs aren't in a still. None = couldn't read."""
+        if self.demo:
+            item = tl.GetCurrentVideoItem() if tl else None
+            graphs = self.graphs(proj, tl, item)
+            return {k: {i: n["enabled"] for i, n in enumerate(g.nodes, 1)} for k, g in graphs.items()
+                    if g and (k == "timeline" or slot_layer(k))}
+        xml = self._still_grade(proj, tl)
+        return drx_graph_states(xml) if xml else None
+
+    @staticmethod
+    def _still_grade(proj, tl) -> str | None:
+        """The current clip's grade as .drx text: a still is grabbed, exported and deleted again."""
         try:
             album = proj.GetGallery().GetCurrentStillAlbum()
             still = tl.GrabStill() if tl and album else None
+            if not still and tl and album:  # Resolve refuses a grab within ~0.5 s of the last one
+                time.sleep(0.5)
+                still = tl.GrabStill()
             if not still:
                 return None
             tmp = tempfile.mkdtemp(prefix="fusebox_")
@@ -538,9 +594,7 @@ class ResolveBridge:
                 album.ExportStills([still], tmp, "dks", "drx")
                 album.DeleteStills([still])
                 files = [f for f in os.listdir(tmp) if f.lower().endswith(".drx")]
-                if not files:
-                    return None
-                return drx_node_states(Path(tmp, files[0]).read_text(encoding="utf-8", errors="replace"))
+                return Path(tmp, files[0]).read_text(encoding="utf-8", errors="replace") if files else None
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
         except Exception as e:
@@ -744,11 +798,20 @@ function Read-Layers($w) {
 """
 
 _LAYER_WATCH_PS = "$ErrorActionPreference = 'SilentlyContinue'\n" + _FIND_SETTINGS_PS + r"""
-$parent = __PARENT__; $last = ''
+$isView = New-Object System.Windows.Automation.PropertyCondition($A::ClassNameProperty, 'UiNodeGraphDropDownButton')
+$parent = __PARENT__; $last = ''; $view = $null; $lastView = ''; $tick = 0
 while (Get-Process -Id $parent) {
   $p = Get-Process Resolve | Select-Object -First 1
   $out = ''; $w = $null
   if ($p) { $w = Find-Settings $p; if ($w) { $out = Read-Layers $w } }
+  # the node editor's graph dropdown ("Clip - L1", "Timeline"...): found once (a search every 3 s while it's
+  # missing), then only its name is read
+  $tick++
+  if ($p -and -not $view -and $p.MainWindowHandle -ne 0 -and $tick % 3 -eq 1) {
+    $view = $A::FromHandle($p.MainWindowHandle).FindFirst($S::Descendants, $isView) }
+  $name = ''
+  if ($view) { try { if (-not $view.Current.IsOffscreen) { $name = $view.Current.Name } } catch { $view = $null } }
+  if ($name -ne $lastView) { $lastView = $name; [Console]::Out.Write("VIEW|" + $name + "`nEND`n"); [Console]::Out.Flush() }
   if ($out -and $out -ne $last) { $last = $out; [Console]::Out.Write($out + "END`n"); [Console]::Out.Flush() }
   elseif (-not $w -and $last) { $last = ''; [Console]::Out.Write("CLOSED`nEND`n"); [Console]::Out.Flush() }
   # open: look often, so the last rename is read before Save closes the window; closed: a cheap check each second
@@ -786,13 +849,109 @@ def watch_resolve_layer_settings(emit) -> None:
     for ln in proc.stdout:
         ln = ln.rstrip("\r\n")
         if ln == "END":
-            d = "closed" if block == ["CLOSED"] else _parse_layer_lines(block)
+            if len(block) == 1 and block[0].startswith("VIEW|"):
+                d = {"view": block[0][5:]}
+            else:
+                d = "closed" if block == ["CLOSED"] else _parse_layer_lines(block)
             block = []
             if d:
                 emit(d)
         else:
             block.append(ln)
 
+
+
+# ----------------------------------------------------------------------------- updates
+
+# Releases are tagged "v0.3.3-r21": the app's version, then the Resolve version it's built for (APP_VERSION's "r21").
+# The repository must be public: the check and the downloads use GitHub without signing in.
+GITHUB_REPO = "train-baker/fuse-box"
+
+
+def _version_key(v: str) -> tuple[tuple[int, ...], str]:
+    """'0.3.3 r21' or 'v0.3.3-r21' -> ((0, 3, 3), 'r21')."""
+    m = re.match(r"v?(\d+(?:\.\d+)*)[ -]?(r\d+)?$", v.strip())
+    return (tuple(int(x) for x in m.group(1).split(".")), m.group(2) or "") if m else ((), "")
+
+
+def _github(url: str) -> bytes:
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}-updater",
+                                               "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return r.read()
+
+
+def latest_release() -> dict:
+    """The newest release for this app's Resolve version (same "r21"): {"tag", "version", "url", "newer"}.
+    Raises when GitHub can't be reached (offline, or the repository isn't public)."""
+    mine, build = _version_key(APP_VERSION)
+    best = None
+    for rel in json.loads(_github(f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30")):
+        if rel.get("draft") or rel.get("prerelease"):
+            continue
+        ver, b = _version_key(rel.get("tag_name", ""))
+        if ver and b == build and (best is None or ver > best[0]):
+            best = (ver, rel)
+    if best is None:
+        return {"tag": None, "version": APP_VERSION, "url": None, "newer": False}
+    ver, rel = best
+    return {"tag": rel["tag_name"], "version": f"{'.'.join(map(str, ver))} {build}".strip(),
+            "url": rel.get("html_url"), "newer": ver > mine}
+
+
+def _git_sha(data: bytes) -> str:
+    """The id GitHub gives a file's contents (a git blob's sha1)."""
+    import hashlib
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def can_self_update() -> str | None:
+    """None when this copy can update its own files; else why not."""
+    if getattr(sys, "frozen", False):
+        return "packaged"
+    if (APP_DIR / ".git").exists():
+        return "git"  # a working copy: update it with git, never overwrite it
+    return None
+
+
+def update_files(tag: str) -> list[str]:
+    """Download only the files of release `tag` that differ from this copy (compared by GitHub's file ids, each
+    download checked against its id), then put them in place. Returns the paths that changed."""
+    from urllib.parse import quote
+    tree = json.loads(_github(f"https://api.github.com/repos/{GITHUB_REPO}/git/trees/{quote(tag)}?recursive=1"))
+    new = {}
+    for item in tree.get("tree", []):
+        path = item["path"]
+        if item["type"] != "blob" or path.startswith(".") or "/." in path:  # .github, .gitignore: not the app
+            continue
+        local = APP_DIR / path
+        if local.exists():
+            data = local.read_bytes()
+            if item["sha"] in (_git_sha(data), _git_sha(data.replace(b"\r\n", b"\n"))):  # same (any line endings)
+                continue
+        data = _github(f"https://raw.githubusercontent.com/{GITHUB_REPO}/{quote(tag)}/{quote(path)}")
+        if _git_sha(data) != item["sha"]:
+            raise RuntimeError(f"{path} didn't download correctly")
+        new[path] = data
+    for path, data in new.items():  # all downloaded and checked first: never half an update
+        local = APP_DIR / path
+        local.parent.mkdir(parents=True, exist_ok=True)
+        tmp = local.with_name(local.name + ".new")
+        tmp.write_bytes(data)
+        os.replace(tmp, local)
+    return sorted(new)
+
+
+def install_requirements() -> bool:
+    """pip install -r requirements.txt with this Python (a release added a package)."""
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        exe = exe.with_name("python.exe")
+    kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WIN else {}
+    r = subprocess.run([str(exe), "-m", "pip", "install", "-r", str(APP_DIR / "requirements.txt")],
+                       capture_output=True, **kw)
+    return r.returncode == 0
 
 
 # ----------------------------------------------------------------------------- open with Resolve
@@ -812,7 +971,7 @@ def _launch_cmd(*extra) -> list[str]:
 # Resolve's Workspace › Scripts menu lists the .py / .lua files in its Scripts folders
 SCRIPT_SHORTCUT = '''"""_{app}: opens {app} from DaVinci Resolve's Workspace › Scripts menu.
 
-Written by {app} (its "Script Shortcut" box, which also removes it). Starts the app in its own process,
+Written by {app} (Settings › "Script Shortcut", which also removes it). Starts the app in its own process,
 so Resolve stays responsive; if it is already running, that window comes forward.
 """
 import subprocess
@@ -1414,15 +1573,57 @@ class _MissingRow(QWidget):
         p.setPen(Qt.NoPen)
         a = self.action
         if self.menu.activeAction() is a and a.isEnabled():  # QMenu::item:selected
-            p.setBrush(QColor(BTN_HOVER))
+            p.setBrush(QColor(MENU_HOVER))
             p.drawRoundedRect(QRectF(self.rect()), 5, 5)
         if not a.isEnabled():
             p.setOpacity(0.4)
         p.setBrush(QColor(BLUE if a.isChecked() else BTN))  # QMenu::indicator
         p.drawRoundedRect(QRectF(5, (self.height() - 11) / 2, 11, 11), 3, 3)
-        p.setPen(QColor(MISSING_GOLD))
+        p.setPen(QColor(CLASH_TEXT))
         p.drawText(QRectF(self.TEXT_X, 0, self.width() - self.TEXT_X, self.height()),
                   Qt.AlignLeft | Qt.AlignVCenter, self.text)
+
+
+class DotAction(QWidgetAction):
+    """A menu item with a status dot on its right, drawn like the connection dot (glow and all)."""
+
+    def __init__(self, text: str, color: QColor | None, menu: QMenu):
+        super().__init__(menu)
+        self.setText(text)
+        row = _DotRow(self, text, color, menu)
+        self.setDefaultWidget(row)
+        menu.hovered.connect(lambda _a: row.update())
+
+
+class _DotRow(QWidget):
+    DOT = 7
+
+    def __init__(self, action: QWidgetAction, text: str, color: QColor | None, menu: QMenu):
+        super().__init__()
+        self.action, self.text, self.color, self.menu = action, text, color, menu
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)  # the menu itself handles hover and click
+
+    def sizeHint(self):
+        return QSize(_MissingRow.TEXT_X + math.ceil(text_width(self.font(), self.text)) + 40, 22)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        if self.menu.activeAction() is self.action:  # QMenu::item:selected
+            p.setBrush(QColor(MENU_HOVER))
+            p.drawRoundedRect(QRectF(self.rect()), 5, 5)
+        if self.color is not None:  # the dot, right-aligned
+            d, x, y = self.DOT, self.width() - self.DOT - 10, (self.height() - self.DOT) / 2
+            glow = QColor(self.color)
+            glow.setAlpha(60)
+            p.setBrush(glow)
+            p.drawEllipse(QRectF(x - 3, y - 3, d + 6, d + 6))
+            p.setBrush(self.color)
+            p.drawEllipse(QRectF(x, y, d, d))
+        p.setPen(QColor(TEXT))
+        p.drawText(QRectF(_MissingRow.TEXT_X, 0, self.width() - _MissingRow.TEXT_X, self.height()),
+                   Qt.AlignLeft | Qt.AlignVCenter, self.text)
 
 
 class StickyMenu(QMenu):
@@ -1436,7 +1637,7 @@ class StickyMenu(QMenu):
 
     @staticmethod
     def _draggable(a) -> bool:
-        return a is not None and a.isEnabled() and a.isCheckable() and a.data() != "all"
+        return a is not None and a.isEnabled() and a.isCheckable() and isinstance(a.data(), dict)  # nodes only
 
     def mousePressEvent(self, e):
         a = self.actionAt(e.position().toPoint())
@@ -1504,7 +1705,7 @@ class NodePicker(QPushButton):
         self.sel: list[dict] = []
         self.nodes = None
         self.placeholder = ""
-        self.label_clash: list[str] = []  # Node Labels in this cell whose ON/OFF disagrees with this scene
+        self.label_clash: list[str] = []  # what in this cell is set against this scene: 'Node Label “NR”', 'L1'…
         self._full = ""
         self._miss: list[dict] = []  # picks not on this clip, worked out in _render
         self.setObjectName("cell")
@@ -1522,7 +1723,7 @@ class NodePicker(QPushButton):
         super().paintEvent(e)
         if self._mixed():  # some picks gone from the clip: those names in italic dark gold, the rest as usual
             self._paint_mixed()
-        if self.label_clash:  # red dot on the right: a Node Label disagrees with this scene
+        if self.label_clash:  # red dot on the right: a Node Label or the Layer State disagrees with this scene
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
             p.setPen(Qt.NoPen)
@@ -1555,7 +1756,7 @@ class NodePicker(QPushButton):
         x, right = 8.0, self._text_right()  # 8: the cell's text padding
         for i, s in enumerate(self.sel):
             name = pick_name(s, missing=s in missing)
-            f, colour = (gone, MISSING_GOLD) if s in missing else (font, TEXT)
+            f, colour = (gone, CLASH_TEXT) if s in missing else (font, TEXT)
             for piece, pf, pc in ((name, f, colour), (", " if i < len(self.sel) - 1 else "", font, TEXT)):
                 if not piece:
                     continue
@@ -1581,8 +1782,13 @@ class NodePicker(QPushButton):
         if self._miss:
             tip += "\n(not all of these are on this clip)"
         if self.label_clash:
-            tip += "\n\nRed dot: Node Label " + ", ".join(f"“{n}”" for n in self.label_clash) + \
-                   " is set the opposite way to this scene"
+            against = [w for w in self.label_clash if not w.endswith(")")]
+            over = [w for w in self.label_clash if w.endswith(")")]
+            if against:
+                tip += (f"\n\nRed dot: {', '.join(against)} "
+                        f"{'is' if len(against) == 1 else 'are'} set the opposite way to this scene")
+            if over:
+                tip += f"\n\nRed dot: {', '.join(over)}; HOLD puts them back"
         self.setToolTip(tip)
         self._elide()
 
@@ -1845,6 +2051,11 @@ class SceneNameEdit(QLineEdit):
 STATE_WORDS = ((None, "HOLD"), (True, "ON"), (False, "OFF"))  # state -> word, in display order
 
 
+def label_key(tag: dict) -> str:
+    """A Node Label's binding name for the hotkey process (labels match in any case)."""
+    return "label:" + tag["name"].lower()
+
+
 def next_state(on):
     """HOLD → ON → OFF → HOLD: what a click on a layer key's or node label's name picks next."""
     return {None: True, True: False, False: None}[on]
@@ -1944,6 +2155,7 @@ class TagChip(QFrame):
     picked = Signal(int, object)  # index, None (HOLD) / True / False
     scoped = Signal(int)
     removed = Signal(int)
+    keyed = Signal(int, object)  # index, its new shortcut (None: removed)
 
     def __init__(self, index: int, tag: dict, parent=None, clash: bool = False):
         super().__init__(parent)
@@ -1971,6 +2183,18 @@ class TagChip(QFrame):
         state_dots(on, {None: f"HOLD: leave the “{n}” nodes as they are", True: f"Switch every “{n}” node ON",
                         False: f"Switch every “{n}” node OFF"}, lambda st: self.picked.emit(index, st), dots)
         h.addLayout(dots)
+        h.addSpacing(4)
+        self.hk = HotkeyButton(self)  # the shortcut, as in a Layer State pill: flips the label ON / OFF
+        self.hk.setObjectName("pillkey")
+        self.hk.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.hk.setFixedHeight(15)
+        self.hk.set_hotkey(tag.get("hotkey"))
+        self.hk.changed.connect(lambda hk: self.keyed.emit(index, hk))
+        key = QHBoxLayout()
+        key.setSpacing(2)
+        key.addWidget(self.hk)
+        key.addWidget(self.hk.clear)
+        h.addLayout(key)
         b_x = IconButton("x", "Remove label (doesn't change any nodes)")
         h.addSpacing(5)
         h.addWidget(b_x)
@@ -1979,8 +2203,9 @@ class TagChip(QFrame):
         scope = "favourite (every project on this machine)" if tag["scope"] == "F" else "this project only"
         self.setToolTip(f"Every node labelled “{n}” in Resolve (any case): all layers, groups and the "
                         f"timeline, on this clip (every enabled clip with “Apply to all clips” ticked).\nNow: {state} · {scope} (right-click to change)\n"
-                        "Click the name to step HOLD → ON → OFF (HOLD changes no nodes).\n"
-                        "While OFF, layer keys and “Entire layer” picks leave these nodes off when they switch "
+                        "Click the name to step HOLD → ON → OFF (HOLD changes no nodes); its shortcut flips "
+                        "ON / OFF (none on HOLD).\n"
+                        "While OFF, a Layer State's HOLD and “Entire layer” picks leave these nodes off when they switch "
                         "a layer back on."
                         + ("\n\nRed: a scene in this preset uses these nodes with the opposite ON/OFF." if clash else ""))
 
@@ -2046,12 +2271,15 @@ class TagsField(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.chips: list[TagChip] = []
+        self.set_hotkey = None  # (tag, hotkey): set by the window
         self.setObjectName("tagfield")
         self.flow = FlowLayout(self, margins=(2, 2, 2, 2), hspacing=5, vspacing=5)  # + the 1 px border: 3 px around the chips
         self.tags: list[dict] = []
         self.typing = False
         self.add_tag = None  # callback(name) set by the window
         self.set_label = None  # callback(tag, state) set by the window
+        self.hold_label = None  # callback(tag): back to HOLD, set by the window
         self.clash: set[str] = set()  # lower-case label names whose ON/OFF disagrees with a scene
 
     def set_tags(self, tags: list[dict]):
@@ -2064,11 +2292,14 @@ class TagsField(QFrame):
             if it.widget():
                 it.widget().hide()  # hide now: deleteLater only removes it on the next event loop pass
                 it.widget().deleteLater()
+        self.chips = []
         for i, t in enumerate(self.tags):
             c = TagChip(i, t, self, clash=t["name"].lower() in self.clash)
             c.picked.connect(self._pick)
             c.scoped.connect(self._scope)
             c.removed.connect(self._remove)
+            c.keyed.connect(lambda i, hk: self.set_hotkey and self.set_hotkey(self.tags[i], hk))
+            self.chips.append(c)
             self.flow.addWidget(c)
             c.show()  # visible now, so the flow layout wraps it onto the next row straight away
         if self.typing:
@@ -2105,9 +2336,8 @@ class TagsField(QFrame):
             if self.set_label:
                 self.set_label(self.tags[i], state)
             return
-        if self.tags[i]["on"] is not None:
-            self.tags[i]["on"] = None
-            self.changed.emit()
+        if self.tags[i]["on"] is not None and self.hold_label:
+            self.hold_label(self.tags[i])
 
     def _scope(self, i):
         self.tags[i]["scope"] = "P" if self.tags[i]["scope"] == "F" else "F"
@@ -2145,7 +2375,7 @@ class FlowHolder(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.flow = FlowLayout(self, hspacing=5, vspacing=5)
+        self.flow = FlowLayout(self, hspacing=5, vspacing=3)  # rows 3 px apart, like the grid's
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
 
     def hasHeightForWidth(self):
@@ -2257,10 +2487,10 @@ class PinButton(QPushButton):
 
 
 class LayerPill(QFrame):
-    """Layer shortcut chip: name · HOLD ON OFF dots · (1 clip) · key box. Click a dot to pick it, the name to
-    step HOLD → ON → OFF; HOLD changes no nodes and the shortcut does nothing. Right-click for options."""
+    """Layer State chip: name · HOLD ON OFF dots · (1 clip) · key box. Click a dot to pick it, the name to step
+    HOLD → ON → OFF. ON / OFF switch the whole layer over the scenes; HOLD puts the scenes' and node labels' states
+    back (its shortcut does nothing). Red when a scene picks nodes on it with the opposite state."""
     picked = Signal(str, object)  # key, None (HOLD) / True (ON) / False (OFF)
-    menu = Signal(str, object)
 
     def __init__(self, key: str, title: str, tip: str, parent=None):
         super().__init__(parent)
@@ -2268,7 +2498,8 @@ class LayerPill(QFrame):
         self.on = None
         self.setObjectName("pill")
         self.setFixedHeight(22)
-        self.setToolTip(tip + "\nClick a dot to pick it, the name to step HOLD → ON → OFF · right-click for options")
+        self._tip = tip + "\nClick a dot to pick it, the name to step HOLD → ON → OFF"
+        self.setToolTip(self._tip)
         h = QHBoxLayout(self)
         h.setContentsMargins(8, 0, 4, 0)
         h.setSpacing(6)
@@ -2281,10 +2512,6 @@ class LayerPill(QFrame):
                                       True: "Switch the whole layer ON", False: "Switch the whole layer OFF"},
                                lambda s: self.picked.emit(self.key, s), dots)
         h.addLayout(dots)
-        self.one = QLabel("1 clip", objectName="one")
-        self.one.setToolTip("This clip only")
-        self.one.setAlignment(Qt.AlignCenter)
-        h.addWidget(self.one)
         self.hk = HotkeyButton(self)
         self.hk.setObjectName("pillkey")
         self.hk.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -2294,8 +2521,6 @@ class LayerPill(QFrame):
         key.addWidget(self.hk)
         key.addWidget(self.hk.clear)
         h.addLayout(key)
-        self.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.customContextMenuRequested.connect(lambda pos: self.menu.emit(self.key, self.mapToGlobal(pos)))
 
     def mousePressEvent(self, e):  # labels pass clicks up to the pill; accept so the release comes here too
         e.setAccepted(e.button() == Qt.LeftButton)
@@ -2304,13 +2529,18 @@ class LayerPill(QFrame):
         if e.button() == Qt.LeftButton and self.name.geometry().contains(e.position().toPoint()):
             self.picked.emit(self.key, next_state(self.on))
 
-    def set_state(self, on, one_clip: bool):
+    def set_state(self, on, clash: list[str] = ()):
+        """clash: what is set the other way to this layer: scenes that pick nodes on it, nodes that were the
+        other way before it left HOLD."""
         self.on = on
         for state, b in self.dots.items():
             b.set_selected(on is state)
         self.name.setProperty("on", on is not None)
-        repolish(self.name)
-        self.one.setVisible(one_clip)
+        for w in (self, self.name):
+            w.setProperty("clash", bool(clash))
+            repolish(w)
+        self.setToolTip(self._tip + (f"\n\nRed, set the other way: {'; '.join(clash)}. This layer's "
+                                     f"{'ON' if on else 'OFF'} wins; HOLD puts them back" if clash else ""))
 
 
 # ----------------------------------------------------------------------------- main window
@@ -2333,6 +2563,7 @@ QCheckBox#allclips {{ color: {ACTION_GOLD}; }}
 QLabel#flash[idle="true"] {{ color: {TEXT_FAINT}; }}
 QLabel#rowlabel {{ color: #808283; padding-right: 8px; }}
 QLabel#rowlabel[layer="true"] {{ color: #a6a6a7; }}
+QLabel#rowlabel[open="true"] {{ color: {ACTION_GOLD}; }}  /* the graph open in Resolve's node editor */
 QLabel#one {{ font-size: 8px; color: {TEXT_DIM}; border: 1px solid {BTN}; border-radius: 4px; padding: 0 3px;
     min-height: 11px; max-height: 11px; }}
 QFrame#grid {{ background: {BG_GRID}; border: none; border-radius: 9px; }}
@@ -2355,12 +2586,14 @@ QPushButton#cell {{ background: {FIELD}; border: 1px solid transparent; border-r
 QPushButton#cell:hover {{ background: #29292b; }}
 QPushButton#cell[empty="true"] {{ color: {TEXT_FAINT}; }}
 QPushButton#cell[all="true"] {{ color: {ACCENT}; }}
-QPushButton#cell[missing="true"] {{ color: {MISSING_GOLD}; font-style: italic; }}
+QPushButton#cell[missing="true"] {{ color: {CLASH_TEXT}; font-style: italic; }}
 QPushButton#cell[recording="true"] {{ color: {TEXT}; }}
 QPushButton#cell[clash="true"] {{ border: 1px solid {RED}; }}
 QFrame#pill {{ background: {FIELD}; border: 1px solid transparent; border-radius: 6px; }}
 QLabel#pillname {{ color: {TEXT_FAINT}; }}
 QLabel#pillname[on="true"] {{ color: {TEXT}; }}
+QFrame#pill[clash="true"] {{ background: #2e2326; border-color: #5a2b28; }}  /* as a Node Label set against a scene */
+QLabel#pillname[clash="true"] {{ color: {CLASH_TEXT}; }}
 QPushButton#pillkey {{ background: {BTN}; border: 1px solid transparent; border-radius: 4px; padding: 0 6px;
     font-size: 12px; color: {TEXT_DIM}; min-height: 13px; }}
 QPushButton#pillkey[recording="true"] {{ color: {TEXT}; }}
@@ -2371,7 +2604,7 @@ QFrame#tag[armed="true"] {{ background: transparent; border: 1px solid {BTN_HOVE
 QFrame#tag[clash="true"] {{ background: #2e2326; border-color: #5a2b28; }}  /* a hint of red */
 QLabel#tagname {{ color: {TEXT}; }}
 QLabel#tagname[armed="true"] {{ color: {TEXT_FAINT}; }}
-QLabel#tagname[clash="true"] {{ color: #b83c31; }}  /* RED, a fifth darker */
+QLabel#tagname[clash="true"] {{ color: {CLASH_TEXT}; }}
 QLineEdit#tagedit {{ background: transparent; border: none; padding: 0 7px 0 8px; color: {TEXT}; }}
 QPushButton#pin {{ padding: 0; }}
 QPushButton#seg {{ padding: 2px 0; min-width: 20px; max-width: 20px; }}
@@ -2382,7 +2615,7 @@ QCheckBox::indicator:checked {{ background: {BLUE}; border-color: transparent; }
 QCheckBox:disabled {{ color: {TEXT_FAINT}; }}
 QMenu {{ background: {BG}; border: 1px solid #34343a; border-radius: 8px; padding: 4px; }}  /* a shade lighter than BG */
 QMenu::item {{ padding: 4px 20px 4px 7px; border-radius: 5px; }}
-QMenu::item:selected {{ background: {BTN_HOVER}; }}
+QMenu::item:selected {{ background: {MENU_HOVER}; }}
 QMenu::item:disabled {{ color: {TEXT_FAINT}; }}
 QMenu::separator {{ height: 1px; background: #1c1c20; margin: 4px 2px; }}  /* the grid divider's contrast on the menu */
 QMenu::indicator {{ width: 11px; height: 11px; border-radius: 3px; border: 1px solid transparent; background: {BTN}; margin-left: 4px; }}
@@ -2412,12 +2645,13 @@ def make_icon() -> QIcon:
 
 
 UNDO_STEPS = 8  # how far Undo / Redo of node picks reach
-WINDOW_W = 1090  # starting width: six layer-shortcut pills fit on one row
+WINDOW_W = 904  # starting width: four scene columns
 
 
 class MainWindow(QMainWindow):
     resolve_windows = Signal(bool)  # from the watcher thread
     layer_settings = Signal(object)  # from the layer-name reader thread
+    update_checked = Signal(object)  # from the update check thread: latest_release() or None (couldn't check)
 
     def __init__(self, demo: bool, standby: bool = False, ignore_pid: int | None = None):
         super().__init__()
@@ -2448,6 +2682,7 @@ class MainWindow(QMainWindow):
         self.rkeys.load()
         self._undo, self._redo = deque(maxlen=UNDO_STEPS), deque(maxlen=UNDO_STEPS)  # node-pick snapshots
         self._picks_before, self._menu_up = [], False
+        self._open_view, self._row_labels = "", {}  # Resolve's node editor dropdown text; grid row -> its label
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}" + (" — demo" if demo else ""))
         self.setWindowIcon(make_icon())
@@ -2469,6 +2704,10 @@ class MainWindow(QMainWindow):
         self.layer_settings.connect(self._apply_layer_settings, Qt.QueuedConnection)
         if not demo:
             threading.Thread(target=watch_resolve_layer_settings, args=(self.layer_settings.emit,), daemon=True).start()
+        self._release = None  # latest_release(), once checked
+        self.update_checked.connect(self._on_update_checked, Qt.QueuedConnection)
+        if not demo:
+            self._check_updates()
         self.watch = ResolveWatch(self._resolve_closed, self._resolve_windows_thread, ignore_pid)
         self._native = [int(self.winId())]  # for hiding from the watcher thread
         if demo or (self.watch.running() and not standby):
@@ -2491,7 +2730,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget(objectName="root")
         v = QVBoxLayout(root)
-        v.setContentsMargins(8, 10, 8, 10)  # the grid box's left line under the title's first letter
+        v.setContentsMargins(8, 15, 8, 10)  # the grid box's left line under the title's first letter
         v.setSpacing(8)
 
         # header: refresh · clean plate · pin
@@ -2573,6 +2812,8 @@ class MainWindow(QMainWindow):
         self.tags_field = TagsField()
         self.tags_field.add_tag = self._add_tag
         self.tags_field.set_label = self.run_label
+        self.tags_field.hold_label = self.hold_label
+        self.tags_field.set_hotkey = self._set_label_hotkey
         self.tags_field.changed.connect(self._tags_changed)
 
         # footer: connection · flash · options · presets
@@ -2598,9 +2839,9 @@ class MainWindow(QMainWindow):
                                 "only.\nTicked: every enabled clip in the timeline (a scene or layer key set to "
                                 "“This clip only” still changes just that clip).\nTimeline nodes belong to the "
                                 "timeline either way.")
-        self.chk_all.toggled.connect(lambda _on: self._sync_all_clips_box())  # unticked at every launch
-        f.addWidget(self.chk_all)  # on the right, next to Script Shortcut: it stays put as the clip name changes
-        f.addSpacing(10)
+        self.chk_all.toggled.connect(self._all_clips_toggled)  # unticked at every launch
+        f.addWidget(self.chk_all)  # on the right, next to Preset: it stays put as the clip name changes
+        f.addSpacing(15)
         self.conn_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         # status line: its own row, above the footer
         self.status = QLabel("", objectName="flash")
@@ -2610,25 +2851,9 @@ class MainWindow(QMainWindow):
         bottom.setSpacing(v.spacing() - 5)
         bottom.addWidget(self.status)
         v.addLayout(bottom)
-        self.chk_script = QCheckBox("Script Shortcut")
-        self.chk_script.setChecked(_script_shortcut_file().exists() if not self.demo else False)
-        if self.chk_script.isChecked():  # point it at this copy, in case the app was moved, renamed or packaged
-            with contextlib.suppress(Exception):
+        if self.cfg["script_shortcut"] and not self.demo:  # (re)written each launch: points at this copy, in
+            with contextlib.suppress(Exception):           # case the app was moved, renamed or packaged
                 set_script_shortcut(True)
-        self.chk_script.setToolTip(f"Add _{APP_NAME} to Resolve's Workspace › Scripts menu, a second way to open "
-                                   f"{APP_NAME}. Untick to remove it.")
-        self.chk_script.toggled.connect(self._set_script_shortcut)
-        f.addWidget(self.chk_script)
-        f.addSpacing(10)
-        self.chk_focus = QCheckBox("Keys only in Resolve")
-        self.chk_focus.setChecked(self.cfg["focus_only"])
-        self.chk_focus.setToolTip("Hotkeys fire only while Resolve (or this window) is focused")
-        self.chk_focus.toggled.connect(self._set_focus_only)
-        if not IS_WIN:
-            self.chk_focus.setEnabled(False)
-            self.chk_focus.setToolTip("Windows only")
-        f.addWidget(self.chk_focus)
-        f.addSpacing(10)
         f.addWidget(QLabel("Preset", objectName="muted"))
         self.seg_btns = []
         for s in range(1, NUM_PRESETS + 1):
@@ -2642,6 +2867,10 @@ class MainWindow(QMainWindow):
         self.btn_load.clicked.connect(lambda: self.load_preset(self.preset_slot))
         f.addWidget(self.btn_save)
         f.addWidget(self.btn_load)
+        f.addSpacing(15)
+        self.btn_settings = QPushButton("Settings")
+        self.btn_settings.clicked.connect(self._settings_menu)
+        f.addWidget(self.btn_settings)
         bottom.addLayout(f)
         # at launch: the preset the scenes match is selected (blue); none → 1
         self._pick_preset(next((s for s in self.cfg["presets"] if self._matches_preset(s)), "1"))
@@ -2654,6 +2883,38 @@ class MainWindow(QMainWindow):
 
     def _layer_name(self, n: int) -> str:
         return self.cfg["layer_names"].get(str(n)) or f"Layer {n}"
+
+    def _open_slot(self) -> str | None:
+        """The row of the graph open in Resolve's node editor, from its dropdown's text: "Timeline",
+        "Clip - <layer name>"... (None: not on the Color page, or not readable)."""
+        text = (self._open_view or "").strip()
+        low = text.lower()
+        if not text:
+            return None
+        if low.startswith("timeline"):
+            return "timeline"
+        if not low.startswith("clip"):
+            if "clip" in low and "pre" in low:
+                return "preclip"
+            if "clip" in low and "post" in low:
+                return "postclip"
+            return None
+        bare = lambda t: re.sub(r"[^0-9a-z]", "", t.lower())  # Resolve shows "--- L1" as "-- -  L1"
+        rest = bare(text[4:])
+        if not rest:
+            return clip_slot(1)
+        for n in range(1, MAX_LAYERS + 1):
+            if rest in (bare(self._layer_name(n)), bare(f"Layer {n}"), bare(f"L{n}")):
+                return clip_slot(n)
+        return None
+
+    def _mark_open_row(self):
+        """The row label of the graph open in Resolve turns gold, like "Apply to all clips"."""
+        slot = self._open_slot()
+        for row, lab in self._row_labels.items():
+            if bool(lab.property("open")) != (row == slot):
+                lab.setProperty("open", row == slot)
+                repolish(lab)
 
     def _layer_key_title(self, key: str) -> str:
         layer = slot_layer(key)
@@ -2686,6 +2947,7 @@ class MainWindow(QMainWindow):
         self._grid_widgets = []
         self.pickers = {}
         self.pills = {}
+        self._row_labels = {}
 
         def temp(w):
             self._grid_widgets.append(w)
@@ -2709,9 +2971,10 @@ class MainWindow(QMainWindow):
                 lab = label(self._layer_name(n), layer=True)
                 lab.setToolTip("Layer name from Resolve › Project Settings › General Options › Color.\n"
                                "Updates on Refresh while that settings window is open.")
-                self.grid.addWidget(lab, r, 0)
             else:
-                self.grid.addWidget(label(slot_title(row)), r, 0)
+                lab = label(slot_title(row))
+            self._row_labels[row] = lab
+            self.grid.addWidget(lab, r, 0)
             for i, t in enumerate(self.cfg["toggles"]):
                 p = temp(NodePicker(i, row))
                 p.set_data(self._nodes.get(row), self._reasons.get(row, "Not connected"), t["sel"].get(row, []))
@@ -2740,8 +3003,8 @@ class MainWindow(QMainWindow):
         for i in range(NUM_TOGGLES):
             self.grid.addWidget(self.hotkey_btns[i], r, i + 1)
         r += 1
-        # Layer shortcut
-        self.grid.addWidget(label("Layer Shortcut"), r, 0, top_right)
+        # Layer State
+        self.grid.addWidget(label("Layer State"), r, 0, top_right)
         holder = temp(FlowHolder())
         flow = holder.flow
         for key in self._slot_order():
@@ -2753,8 +3016,7 @@ class MainWindow(QMainWindow):
             pill.hk.set_hotkey(lk.get("hotkey"))
             pill.hk.changed.connect(lambda hk, key=key: self._set_layer_hotkey(key, hk))
             pill.picked.connect(self._pick_layer)
-            pill.menu.connect(self._layer_menu)
-            pill.set_state(lk["on"], lk["one_clip"])
+            pill.set_state(lk["on"])
             self.pills[key] = pill
             flow.addWidget(pill)
         self.grid.addWidget(holder, r, 1, 1, NUM_TOGGLES)
@@ -2768,10 +3030,18 @@ class MainWindow(QMainWindow):
         self.grid.addWidget(self.tags_field, r, 1, 1, NUM_TOGGLES)
         self._refresh_tags()
         self._mark_clashes()
+        self._mark_open_row()
         QTimer.singleShot(0, self._fit_height)
         QTimer.singleShot(80, self._fit_height)  # again once new cells are styled
 
     def _refresh_clicked(self):
+        self.setUpdatesEnabled(False)  # one repaint at the end, no blink in between
+        try:
+            self._refresh()
+        finally:
+            self.setUpdatesEnabled(True)
+
+    def _refresh(self):
         if self.bridge.resolve is not None and self._visible_tags():
             self._sync_labels(self._visible_tags())
             self.save()
@@ -2786,30 +3056,51 @@ class MainWindow(QMainWindow):
             self.try_connect()
 
     def _drop_missing(self):
-        """Refresh: forget the picks that are no longer in the clip's node tree (where the tree could be read)."""
-        dropped = 0
+        """Refresh: a pick whose node was renamed in Resolve takes the new name (same node number); picks whose
+        node is gone from the clip's node tree are forgotten (where the tree could be read)."""
+        renamed, dropped = [], 0
         for t in self.cfg["toggles"]:
             for slot, sel in list(t["sel"].items()):
                 nodes = self._nodes.get(slot)
                 if nodes is None:
                     continue
-                keep = [s for s in sel if s.get("all") or match_nodes(nodes, [s])]
-                dropped += len(sel) - len(keep)
+                labels = {n[0]: n[1] for n in nodes}  # node number -> its label now
+                keep = []
+                for pick in sel:
+                    if not pick.get("all") and not pick.get("label") and labels.get(pick.get("index")):
+                        new = labels[pick["index"]]  # the node got a name in Resolve
+                        renamed.append(f"{pick_name(pick)} → {new}")
+                        pick = {"index": pick["index"], "label": new}
+                    if not (pick.get("all") or match_nodes(nodes, [pick])):
+                        if pick.get("index") not in labels:  # the node is gone
+                            dropped += 1
+                            continue
+                        new = labels[pick["index"]]  # same node number, renamed in Resolve
+                        renamed.append(f"{pick_name(pick)} → {pick_name({'index': pick['index'], 'label': new})}")
+                        pick = {"index": pick["index"], "label": new}
+                    if pick not in keep:
+                        keep.append(pick)
                 if not keep:
                     del t["sel"][slot]
-                elif len(keep) < len(sel):
+                elif keep != sel:
                     t["sel"][slot] = keep
-        if dropped:
+        if renamed or dropped:
             self.save()
-            self._rows = []  # rebuild the grid without them
-            self._show_nodes(self._rows_for(self._layers))
+            self._show_nodes(self._rows_for(self._layers))  # the cells take the new names, in place
             self.refresh_states()
             self._refresh_tags()
-            self.flash(f"Refresh: removed {dropped} pick{'s' if dropped != 1 else ''} no longer on this clip")
+            parts = [f"renamed {', '.join(renamed)}"] if renamed else []
+            if dropped:
+                parts.append(f"removed {dropped} pick{'s' if dropped != 1 else ''} no longer on this clip")
+            self.flash("Refresh: " + "; ".join(parts), 8000)
 
     def _apply_layer_settings(self, d):
         """From the watcher: Project Settings' layer names / Post Group while it's open (held), then "closed"
-        (applied: nothing changes while it's open)."""
+        (applied: nothing changes while it's open). Also the graph open in Resolve's node editor ({"view": text})."""
+        if isinstance(d, dict) and "view" in d:
+            self._open_view = d["view"]
+            self._mark_open_row()
+            return
         if d != "closed":
             self._pending_layers = d
             return
@@ -2841,7 +3132,7 @@ class MainWindow(QMainWindow):
             self.flash("Couldn't read Resolve's keyboard shortcuts, so clashes can't be checked", 8000)
 
     def _mark_clashes(self):
-        for b in self.hotkey_btns + [p.hk for p in self.pills.values()]:
+        for b in self.hotkey_btns + [p.hk for p in self.pills.values()] + [c.hk for c in self.tags_field.chips]:
             b.set_clash(self.rkeys.clash(b.hotkey))
 
     def _confirm_key(self, hk, who: str) -> bool:
@@ -2851,24 +3142,28 @@ class MainWindow(QMainWindow):
         if not hits:
             return True
         more = f" and {len(hits) - 3} more" if len(hits) > 3 else ""
+        return self._ask("Shortcut already used by Resolve",
+                         f"{gold(hk['text'])} is also Resolve's {', '.join(f'“{gold(h)}”' for h in hits[:3])}"
+                         f"{html.escape(more)}.",
+                         f"If you give it to {html.escape(who)}, both will fire when you press it.",
+                         "Use anyway", "Pick another")
+
+    def _ask(self, title: str, text: str, info: str, yes: str, no: str) -> bool:
+        """The app's alert: sign, rich text (gold() for keys and names), two buttons. True = yes."""
         box = QMessageBox(self)
-        box.setWindowTitle("Shortcut already used by Resolve")
+        box.setWindowTitle(title)
         box.setStyleSheet("QLabel { font-size: 12px; }")  # a step up from the window's 11px
         box.setIconPixmap(QIcon(str(ALERT_ICON)).pixmap(QSize(32, 32), self.devicePixelRatioF()))
         QTimer.singleShot(0, lambda: alert_title_bar(box))  # once it's on screen
-
-        def gold(t: str) -> str:  # the key and Resolve's commands
-            return f'<span style="color:{ALERT_GOLD}">{html.escape(t)}</span>'
 
         def para(t: str) -> str:  # a little more room between the lines of a wrapped sentence
             return f'<p style="line-height:125%; margin:0">{t}</p>'
 
         box.setTextFormat(Qt.RichText)
-        box.setText(para(f"{gold(hk['text'])} is also Resolve's {', '.join(f'“{gold(h)}”' for h in hits[:3])}"
-                         f"{html.escape(more)}."))
-        box.setInformativeText(para(f"If you give it to {html.escape(who)}, both will fire when you press it."))
-        keep = box.addButton("Use anyway", QMessageBox.AcceptRole)
-        box.addButton("Pick another", QMessageBox.RejectRole)
+        box.setText(para(text))
+        box.setInformativeText(para(info))
+        keep = box.addButton(yes, QMessageBox.AcceptRole)
+        box.addButton(no, QMessageBox.RejectRole)
         lay = box.layout()
         lay.setContentsMargins(18, 13, 18, 12)  # room between the border and everything in it (the sign's top)
         lay.setVerticalSpacing(4)  # the two lines of text closer together
@@ -2935,7 +3230,10 @@ class MainWindow(QMainWindow):
     def _bind(self):
         b = [(i, t.get("hotkey")) for i, t in enumerate(self.cfg["toggles"])]
         b += [(k, v.get("hotkey")) for k, v in self.cfg["layer_keys"].items()]
-        self.hotkeys.set_bindings(b)
+        b += [(label_key(t), t.get("hotkey")) for t in self._visible_tags()]  # this project's node labels
+        if b != getattr(self, "_bound", None):  # (runs on every Node Label refresh)
+            self._bound = b
+            self.hotkeys.set_bindings(b)
 
     def refresh_states(self):
         for i, t in enumerate(self.cfg["toggles"]):
@@ -2944,7 +3242,21 @@ class MainWindow(QMainWindow):
             self.one_marks[i].setVisible(bool(t.get("one_clip")))
         for key, pill in self.pills.items():
             lk = self.cfg["layer_keys"].get(key, {})
-            pill.set_state(lk.get("on"), lk.get("one_clip", False))
+            on = lk.get("on")
+            # a mismatch always pairs with something: a scene that picks nodes on this layer, or a Node Label on it
+            scenes = [] if on is None else [t for t in self.cfg["toggles"] if t["on"] is not None and t["sel"].get(key)]
+            on_layer = {str(n[1] or "").lower() for n in self._nodes.get(key) or []}
+            tags = [] if on is None else [t for t in self._visible_tags()
+                                          if t["on"] is not None and t["name"].lower() in on_layer]
+            clash = [t["name"] for t in scenes if t["on"] != on] + \
+                    [f"Node Label “{t['name']}”" for t in tags if t["on"] != on]
+            if (scenes or tags) and lk.get("before"):  # what HOLD will put back: nodes that were the other way
+                names = {n[0]: n[1] for n in self._nodes.get(key) or []}
+                other = [pick_name({"index": int(i), "label": names.get(int(i))})
+                         for i, was in lk["before"]["nodes"].items() if was != on]
+                if other:
+                    clash.append(f"{', '.join(other)} (was {'OFF' if on else 'ON'} before)")
+            pill.set_state(on, clash)
 
     # ---------------------------------------------------------------- tags
     def _visible_tags(self) -> list[dict]:
@@ -2952,12 +3264,18 @@ class MainWindow(QMainWindow):
         return [t for t in self.cfg["tags"] if t["scope"] == "F" or t.get("project") == pk]
 
     def _label_clashes(self) -> set[str]:
-        """Node Labels whose ON/OFF disagrees with a scene (not HOLD) that picks a node with that label."""
+        """Node Labels whose ON/OFF disagrees with a scene (not HOLD) that picks a node with that label, or with the
+        Layer State of a layer that has a node with that label."""
         out = set()
         for tag in self._visible_tags():
             if tag["on"] is None:  # HOLD: nothing to compare yet
                 continue
             name = tag["name"].lower()
+            if any(lk.get("on") is not None and lk["on"] != tag["on"]
+                   and name in {str(n[1] or "").lower() for n in self._nodes.get(key) or []}
+                   for key, lk in self.cfg["layer_keys"].items()):
+                out.add(name)
+                continue
             for t in self.cfg["toggles"]:
                 if t["on"] is None or t["on"] == tag["on"]:
                     continue
@@ -2969,17 +3287,29 @@ class MainWindow(QMainWindow):
     def _refresh_tags(self):
         self.tags_field.clash = self._label_clashes()
         self.tags_field.set_tags(self._visible_tags())
-        # red dot on every scene cell that picks a node whose Node Label is set the other way
+        self._mark_clashes()  # the chips are new: their key boxes too
+        self._bind()  # another project's labels, or a label's key changed
+        # red dot on every scene cell that picks a node whose Node Label, or whose layer's Layer State, is set
+        # the other way
         labels = {t["name"].lower(): t for t in self._visible_tags() if t["on"] is not None}
         for (i, slot), picker in self.pickers.items():
             t = self.cfg["toggles"][i]
-            names = []
-            if t["on"] is not None:
-                for sp in t["sel"].get(slot, []):
+            why = []
+            if t["on"] is not None and t["sel"].get(slot):
+                for sp in t["sel"][slot]:
                     tag = labels.get(str(sp.get("label") or "").lower())
-                    if tag and tag["on"] != t["on"] and tag["name"] not in names:
-                        names.append(tag["name"])
-            picker.set_label_clash(names)
+                    if tag and tag["on"] != t["on"] and f"Node Label “{tag['name']}”" not in why:
+                        why.append(f"Node Label “{tag['name']}”")
+                lk = self.cfg["layer_keys"].get(slot, {})
+                layer_on = lk.get("on")
+                mixed = layer_on is not None and any(was != layer_on for was in
+                                                     (lk.get("before") or {}).get("nodes", {}).values())
+                if layer_on is not None and layer_on != t["on"]:
+                    why.append(f"Layer State {self._layer_key_title(slot)}")
+                elif mixed:  # agrees with the scene, but overrides nodes that were the other way
+                    why.append(f"Layer State {self._layer_key_title(slot)} ({'ON' if layer_on else 'OFF'} "
+                               f"over nodes that were {'OFF' if layer_on else 'ON'})")
+            picker.set_label_clash(why)
         QTimer.singleShot(0, self._fit_height)
 
     def _add_tag(self, name: str):
@@ -3032,6 +3362,19 @@ class MainWindow(QMainWindow):
         self.save()
         self._refresh_tags()
 
+    def _layer_snapshot(self, key: str) -> dict | None:
+        """The layer's real node states on the clip under the playhead (the timeline's for "timeline"), read from
+        Resolve: {"clip": its id, "nodes": {number: on}}. None where they can't be read (pre- / post-group)."""
+        if key in ("preclip", "postclip") or self.bridge.resolve is None:
+            return None
+        try:
+            proj, tl, item = self.bridge.context()
+            states = (self.bridge.graph_states(proj, tl) or {}).get(key) if proj and tl else None
+            clip = "timeline" if key == "timeline" else (_safe(item.GetUniqueId) if item else None)
+        except Exception:
+            return None
+        return {"clip": clip, "nodes": {str(i): on for i, on in states.items()}} if states and clip else None
+
     def _keep_off(self, slot: str):
         """Skip function for switching a whole graph back ON: leaves off the nodes that should stay off —
         nodes with an OFF node label, and nodes explicitly picked in a scene that is OFF."""
@@ -3081,6 +3424,9 @@ class MainWindow(QMainWindow):
         for k, v in self.cfg["layer_keys"].items():
             if k != skip and same(v.get("hotkey")):
                 return ("layer", k)
+        for t in self._visible_tags():
+            if label_key(t) != skip and same(t.get("hotkey")):
+                return ("label", t)
         return None
 
     def _clear_owner(self, owner, hk, new_name):
@@ -3089,6 +3435,9 @@ class MainWindow(QMainWindow):
             old = self.cfg["toggles"][who]["name"]
             self.cfg["toggles"][who]["hotkey"] = None
             self.hotkey_btns[who].set_hotkey(None)
+        elif kind == "label":  # its chip is rebuilt by the caller's _refresh_tags
+            old = f"“{who['name']}”"
+            who["hotkey"] = None
         else:
             old = self._layer_key_title(who)
             self.cfg["layer_keys"][who]["hotkey"] = None
@@ -3113,6 +3462,18 @@ class MainWindow(QMainWindow):
         self._bind()
         self.save()
         self.refresh_states()
+
+    def _set_label_hotkey(self, tag: dict, hk):
+        """A Node Label chip's key box: same checks as a layer key (Resolve clash, a key used elsewhere moves)."""
+        name = f"“{tag['name']}”"
+        if hk and not self._confirm_key(hk, name):
+            self._refresh_tags()  # back to its old key
+            return
+        if hk and (owner := self._key_owner(hk, label_key(tag))):
+            self._clear_owner(owner, hk, name)
+        tag["hotkey"] = hk
+        self.save()
+        self._refresh_tags()  # rebuilds the chips (new widths), re-marks clashes and rebinds
 
     def _set_layer_hotkey(self, key: str, hk):
         if hk and not self._confirm_key(hk, self._layer_key_title(key)):
@@ -3187,11 +3548,19 @@ class MainWindow(QMainWindow):
     def _pick_state(self, i: int, state: bool | None):
         if state is not None:
             self.run_toggle(i, state)
-        elif self.cfg["toggles"][i]["on"] is not None:
-            self.cfg["toggles"][i]["on"] = None
+        elif self.cfg["toggles"][i]["on"] is not None:  # HOLD: its nodes back to how they were before ON / OFF
+            t = self.cfg["toggles"][i]
+            before = t.pop("before", None)
+            n = self._restore(before, t["name"])
+            t["on"] = None
             self.save()
             self.refresh_states()
             self._refresh_tags()
+            if n:
+                self.flash(f"{t['name']} → HOLD: back to how it was before ({n} node{'s' if n != 1 else ''})")
+            elif before:
+                self.flash(f"{t['name']} → HOLD: its nodes are left as they are (another clip, or Resolve didn't "
+                           f"switch them)")
 
     def _state_menu(self, i: int, gpos):
         t = self.cfg["toggles"][i]
@@ -3201,24 +3570,6 @@ class MainWindow(QMainWindow):
         a.setChecked(bool(t.get("one_clip")))
         a.toggled.connect(lambda on: self._set_one_clip(i, on))
         m.exec(gpos)
-
-    def _layer_menu(self, key: str, gpos):
-        lk = self.cfg["layer_keys"][key]
-        m = QMenu(self)
-        m.addAction("Force ON", lambda: self.run_layer(key, True))
-        m.addAction("Force OFF", lambda: self.run_layer(key, False))
-        if key != "timeline":  # the timeline graph is shared, so "this clip" means nothing there
-            m.addSeparator()
-            a = m.addAction("This clip only")
-            a.setCheckable(True)
-            a.setChecked(lk.get("one_clip", False))
-            a.toggled.connect(lambda on: self._set_layer_one_clip(key, on))
-        m.exec(gpos)
-
-    def _set_layer_one_clip(self, key: str, on: bool):
-        self.cfg["layer_keys"][key]["one_clip"] = on
-        self.save()
-        self.refresh_states()
 
     def _set_one_clip(self, i: int, on: bool):
         self.cfg["toggles"][i]["one_clip"] = on
@@ -3288,7 +3639,109 @@ class MainWindow(QMainWindow):
         self.refresh_states()
         self.flash("Clean plate: all scenes reset")
 
+    def _settings_menu(self):
+        """Settings: a menu that opens upwards from its button, right edges aligned, styled like the node lists."""
+        if time.monotonic() - getattr(self, "_settings_closed", 0) < 0.3:
+            return  # this click on the button just closed the menu: leave it closed
+        m = StickyMenu(self)
+        m.setToolTipsVisible(True)
+        rel = self._release
+        if rel and rel["newer"]:
+            a = DotAction("Update Release", QColor(ACCENT), m)
+            a.setToolTip(f"{APP_NAME} {rel['version']} is out (you have {APP_VERSION})")
+            a.triggered.connect(self._update_release)
+        elif rel:
+            a = DotAction("Running Latest Release", CONN_COLOR, m)
+            a.setToolTip(f"{APP_NAME} {APP_VERSION} is the latest release")
+        else:
+            a = DotAction("Check for Updates", QColor("#1f1f1f"), m)
+            a.setToolTip("Couldn't reach GitHub at start: check again")
+            a.triggered.connect(lambda: self._check_updates(report=True))
+        m.addAction(a)
+        m.addSeparator()
+        items = [("Script Shortcut", self.cfg["script_shortcut"], self._set_script_shortcut,
+                  f"Add _{APP_NAME} to Resolve's Workspace › Scripts menu, a second way to open {APP_NAME}"),
+                 ("Keys only in Resolve", self.cfg["focus_only"], self._set_focus_only,
+                  "Shortcuts work only while Resolve (or this window) is in front" if IS_WIN else "Windows only")]
+        for text, on, slot, tip in items:
+            a = QAction(text, m, checkable=True)
+            a.setChecked(on)
+            a.setToolTip(tip)
+            a.setEnabled(IS_WIN or slot != self._set_focus_only)
+            a.toggled.connect(slot)
+            m.addAction(a)
+        b = self.btn_settings
+        size = m.sizeHint()
+        m.exec(b.mapToGlobal(QPoint(b.width() - size.width(), -size.height() - 2)))
+        self._settings_closed = time.monotonic()
+        m.deleteLater()
+
+    def _check_updates(self, report: bool = False):
+        """Ask GitHub for the latest release, in the background (at every start; again from Settings)."""
+        self._report_update = report
+
+        def run():
+            try:
+                rel = latest_release()
+            except Exception as e:
+                print(f"Couldn't check for updates: {e}", file=sys.stderr)
+                rel = None
+            self.update_checked.emit(rel)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_update_checked(self, rel):
+        self._release = rel
+        if rel and rel["newer"]:
+            self.flash(f"{APP_NAME} {rel['version']} is out: Settings › Update Release", 8000)
+        elif self._report_update:
+            self.flash(f"{APP_NAME} {APP_VERSION} is the latest release" if rel else
+                       "Couldn't reach GitHub to check for updates")
+
+    def _update_release(self):
+        """Download only the files that changed in the latest release, put them in place, restart."""
+        rel = self._release
+        why = can_self_update()
+        if why == "packaged":  # a packaged app can't swap one file: the release page has the new build
+            QDesktopServices.openUrl(QUrl(rel["url"]))
+            return
+        if why == "git":
+            self.flash("This copy is a git working copy: update it with git pull", 8000)
+            return
+        if not self._ask("Update Release", f"Update {APP_NAME} to {gold(rel['version'])}?",
+                         f"Only the files that changed are downloaded; {html.escape(APP_NAME)} then restarts.",
+                         "Update", "Not now"):
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            changed = update_files(rel["tag"])
+            pip_ok = "requirements.txt" not in changed or install_requirements()
+        except Exception as e:
+            self.flash(f"Update failed, nothing changed: {e}", 10000)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not pip_ok:
+            self.flash("Updated, but a new package didn't install: run pip install -r requirements.txt", 15000)
+            return
+        self._restart()
+
+    def _restart(self):
+        """Start this app again (it waits for this one to close) and quit."""
+        with contextlib.suppress(Exception):
+            self.hotkeys.stop()
+            save_config(self.cfg, self.demo)
+            if self.server:
+                self.server.close()
+        kw = ({"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP} if IS_WIN
+              else {"start_new_session": True})
+        subprocess.Popen(_launch_cmd("--restarted", *(["--demo"] if self.demo else [])), stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
+        os._exit(0)
+
     def _set_script_shortcut(self, on: bool):
+        self.cfg["script_shortcut"] = on
+        self.save()
         if self.demo:
             return
         try:
@@ -3498,6 +3951,9 @@ class MainWindow(QMainWindow):
             self._proj_key = pk
             self._refresh_tags()
         self._show_nodes(self._rows_for(layers))
+        self.refresh_states()  # the pills' mismatches follow this clip's nodes and labels
+        if self._label_clashes() != self.tags_field.clash:
+            self._refresh_tags()
 
     def _demo_next_clip(self):
         self.bridge.resolve.GetProjectManager().GetCurrentProject().GetCurrentTimeline().advance()
@@ -3505,7 +3961,7 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- actions
     def _recording(self) -> bool:
-        btns = self.hotkey_btns + [p.hk for p in self.pills.values()]
+        btns = self.hotkey_btns + [p.hk for p in self.pills.values()] + [c.hk for c in self.tags_field.chips]
         return any(b.recording or time.monotonic() - b.stopped_at < 0.4 for b in btns)
 
     def on_hotkey(self, key):
@@ -3515,11 +3971,29 @@ class MainWindow(QMainWindow):
             return  # typing a scene name or a tag
         if isinstance(key, int):
             self.run_toggle(key)
+        elif key.startswith("label:"):
+            tag = next((t for t in self._visible_tags() if label_key(t) == key), None)
+            if tag is None:
+                return
+            if tag["on"] is None:
+                self.flash(f"“{tag['name']}” is on HOLD — pick ON or OFF to use its shortcut")
+            else:
+                self.run_label(tag)  # ON → OFF, OFF → ON
         else:
             self.run_layer(key)
 
     def _sync_all_clips_box(self):
         self.all_clips_box.setVisible(self.chk_all.isChecked() and self._has_clip)
+
+    def _all_clips_toggled(self, on: bool):
+        """Ticking / unticking "Apply to all clips" re-applies every ON / OFF scene in the new scope, as another
+        click on its state; scenes on HOLD are left alone."""
+        self._sync_all_clips_box()
+        done = [t["name"] for i, t in enumerate(self.cfg["toggles"])
+                if t["on"] is not None and has_selection(t) and self.run_toggle(i, t["on"]) is not False]
+        if done:
+            where = "every enabled clip" if on else "this clip"
+            self.flash(f"Apply to all clips {'on' if on else 'off'}: {', '.join(done)} re-applied on {where}")
 
     def _sweep(self, title: str, word: str, one_clip: bool, per_item, per_tl):
         """Run per_item over the clip under the playhead (one_clip, or "Apply to all clips" unticked) or every
@@ -3578,6 +4052,7 @@ class MainWindow(QMainWindow):
             return
         new_state = (t["on"] is False) if state is None else state  # ON → OFF, OFF → ON
         word = "ON" if new_state else "OFF"
+        before = self._snapshot(lambda slot: t["sel"].get(slot)) if t["on"] is None else None  # for HOLD
         cache = {}
 
         def skip_for(slot):  # only matters when switching "Entire layer" picks back on
@@ -3592,66 +4067,96 @@ class MainWindow(QMainWindow):
                                                skip_for("timeline")))
         res = self._sweep(t["name"], word, bool(t.get("one_clip")), per_item, per_tl)
         if res is None:
-            return
+            return False
+        if t["on"] is None:
+            t["before"] = before
         t["on"] = new_state
         self.save()
         self.refresh_states()
         self._refresh_tags()  # Node Labels turn red if they now disagree with this scene
         self._report(t["name"], word, res)
+        return True
 
     def _layer_key(self, key: str) -> dict:
         """A layer key's settings, made on first use: no shortcut, HOLD, every clip."""
-        return self.cfg["layer_keys"].setdefault(key, {"hotkey": None, "on": None, "one_clip": False})
+        return self.cfg["layer_keys"].setdefault(key, {"hotkey": None, "on": None})
 
     def _pick_layer(self, key: str, state):
-        """A layer key's dot or name: HOLD only parks it (no nodes change), ON / OFF switch the layer."""
+        """A layer key's dot or name: ON / OFF switch the whole layer over the scenes; HOLD puts it back the way
+        the scenes and node labels have it (its shortcut then does nothing)."""
         if state is not None:
             self.run_layer(key, state)
-            return
-        self._layer_key(key)["on"] = None
-        self.save()
-        self.refresh_states()
-        self.flash(f"{self._layer_key_title(key)} → HOLD (its shortcut does nothing until you pick ON or OFF)")
+        elif self._layer_key(key)["on"] is not None:
+            self.run_layer(key, restore=True)
 
-    def run_layer(self, key: str, state: bool | None = None):
+    def run_layer(self, key: str, state: bool | None = None, restore: bool = False):
+        """ON / OFF: every node on the layer, over the scenes and node labels; leaving HOLD first remembers how the
+        layer really is on the clip under the playhead (read from Resolve). restore: HOLD — that clip back exactly
+        as remembered; elsewhere (other clips, pre- / post-group) every node as the scenes and node labels have
+        it: off when picked in an OFF scene or labelled with an OFF node label, else on."""
         if not SLOT_RE.match(key):
             return
         lk = self._layer_key(key)
         title = self._layer_key_title(key)
-        if state is None and lk["on"] is None:  # HOLD: the shortcut leaves the nodes alone
+        if state is None and lk["on"] is None and not restore:  # HOLD: the shortcut leaves the nodes alone
             self.flash(f"{title} is on HOLD — pick ON or OFF to use it")
             return
-        new_state = (not lk["on"]) if state is None else state
-        word = "ON" if new_state else "OFF"
-        protect = self._keep_off(key) if new_state else None  # back ON: keep the "should stay off" nodes off
+        new_state = None if restore else (not lk["on"]) if state is None else state
+        word = "HOLD" if restore else "ON" if new_state else "OFF"
+        if lk["on"] is None and not restore:  # leaving HOLD: remember how the layer is, for HOLD to put back
+            lk["before"] = self._layer_snapshot(key)
+        before = lk.get("before") or {}
+        stay_off = self._keep_off(key) if restore else None
         ALL = [{"all": True}]
         b = self.bridge
+
+        def act(graph, item_id=None) -> int:
+            if not restore:
+                return b.apply(graph, ALL, new_state)
+            if graph is not None and item_id and item_id == before.get("clip"):  # as it really was
+                return sum(1 for i, on in before["nodes"].items() if graph.SetNodeEnabled(int(i), on))
+            n = b.apply(graph, ALL, True, stay_off)  # elsewhere: on, but for the nodes that should stay off…
+            if stay_off:
+                n += b.apply(graph, ALL, False, lambda node: not stay_off(node))  # …which go off
+            return n
+
         per_item = per_tl = None
         if key == "timeline":
-            per_tl = lambda tl: b.apply(_safe(tl.GetNodeGraph), ALL, new_state, protect)
+            per_tl = lambda tl: act(_safe(tl.GetNodeGraph), "timeline")
         elif key in ("preclip", "postclip"):
             getter = "GetPreClipNodeGraph" if key == "preclip" else "GetPostClipNodeGraph"
 
             def per_item(it, g, proj):
                 grp = b.group_once(it, g)
-                return b.apply(_safe(getattr(grp, getter)), ALL, new_state, protect) if grp else 0
+                return act(_safe(getattr(grp, getter))) if grp else 0
         else:
             layer = slot_layer(key)
-            per_item = lambda it, g, proj: b.apply(_safe(it.GetNodeGraph, layer), ALL, new_state, protect)
-        one = bool(lk.get("one_clip")) and key != "timeline"
-        res = self._sweep(title, word, one, per_item, per_tl)
+            per_item = lambda it, g, proj: act(_safe(it.GetNodeGraph, layer), _safe(it.GetUniqueId))
+        res = self._sweep(title, word, False, per_item, per_tl)
         if res is None:
             return
+        if not res[0]:  # Resolve switched nothing (no nodes, or a dialog open in Resolve): keep state and memory
+            self.flash(f"{title}: Resolve didn't switch any node — close any open dialog in Resolve and try again")
+            return
         lk["on"] = new_state
+        if restore:
+            lk.pop("before", None)
         self.save()
         self.refresh_states()
-        self._report(title, word, res)
+        self._refresh_tags()  # the scene cells' red dots follow the layer
+        if restore:
+            n, where = res
+            how = "how it was before" if before else "the scenes' and node labels' states"
+            self.flash(f"{title} → HOLD: back to {how} ({n} node{'s' if n != 1 else ''}{' ' + where if where else ''})")
+        else:
+            self._report(title, word, res)
 
     def run_label(self, tag: dict, state: bool | None = None):
         """Switch every node with this label ON / OFF: all layers, groups and the timeline, this clip or every one.
         state None = flip (HOLD → OFF)."""
         new_state = (tag["on"] is False) if state is None else state
         word = "ON" if new_state else "OFF"
+        before = self._label_snapshot(tag) if tag["on"] is None else None  # leaving HOLD: for HOLD to put back
         sel = [{"label": tag["name"], "ci": True}]
         b = self.bridge
         cap = {}
@@ -3672,12 +4177,68 @@ class MainWindow(QMainWindow):
             return
         n, where = res
         if n:
+            if tag["on"] is None:
+                tag["before"] = before
             tag["on"] = new_state
             self.save()
             self._refresh_tags()
+            self.refresh_states()  # the Layer State pills it pairs with
             self.flash(f"“{tag['name']}” → {word}  ({n} node{'s' if n != 1 else ''} {where})")
         else:  # nothing matched: leave the label's state alone
             self.flash(f"No nodes labelled “{tag['name']}” found on enabled clips — check the spelling in Resolve")
+
+    def _snapshot(self, picks) -> dict | None:
+        """Real on/off of the nodes picks(slot) chooses on the clip under the playhead (its layers and the timeline;
+        pre- / post-group can't be read): {"clip": its id, "nodes": {slot: {number: on}}}. None if unreadable."""
+        if self.bridge.resolve is None:
+            return None
+        try:
+            proj, tl, item = self.bridge.context()
+            states = self.bridge.graph_states(proj, tl) if proj and tl and item else None
+            clip = _safe(item.GetUniqueId) if item else None
+        except Exception:
+            return None
+        nodes = {}
+        for slot, st in (states or {}).items():
+            sel = picks(slot)
+            chosen = set(match_nodes(self._nodes.get(slot) or [], sel)) if sel else set()
+            hit = {str(i): on for i, on in st.items() if i in chosen}
+            if hit:
+                nodes[slot] = hit
+        return {"clip": clip, "nodes": nodes} if nodes and clip else None
+
+    def _restore(self, before: dict | None, what: str) -> int:
+        """Put a _snapshot back, on the clip it was read from (elsewhere nothing changes). Returns nodes set."""
+        n = 0
+        if before and self.bridge.resolve is not None:
+            try:
+                proj, tl, item = self.bridge.context()
+                if item and _safe(item.GetUniqueId) == before["clip"]:
+                    for slot, st in before["nodes"].items():
+                        g = _safe(tl.GetNodeGraph) if slot == "timeline" else _safe(item.GetNodeGraph, slot_layer(slot))
+                        if g is not None:
+                            n += sum(1 for i, on in st.items() if g.SetNodeEnabled(int(i), on))
+            except Exception as e:
+                print(f"Couldn't restore {what}: {e}", file=sys.stderr)
+        return n
+
+    def _label_snapshot(self, tag: dict) -> dict | None:
+        return self._snapshot(lambda slot: [{"label": tag["name"], "ci": True}])
+
+    def hold_label(self, tag: dict):
+        """Node Label back to HOLD: on the clip it was read from, its nodes go back to how they were before ON / OFF;
+        elsewhere they're left as they are."""
+        before = tag.pop("before", None)
+        n = self._restore(before, f"“{tag['name']}”")
+        tag["on"] = None
+        self.save()
+        self._refresh_tags()
+        self.refresh_states()
+        if n:
+            self.flash(f"“{tag['name']}” → HOLD: back to how it was before ({n} node{'s' if n != 1 else ''})")
+        elif before:
+            self.flash(f"“{tag['name']}” → HOLD: its nodes are left as they are (another clip, or Resolve didn't "
+                       f"switch them)")
 
     def _scenes(self) -> list[dict]:
         """The scenes as a preset holds them: names, keys, node picks; not their ON/OFF."""
@@ -3748,6 +4309,11 @@ def colorref(colour: str) -> int:
     return c.red() | c.green() << 8 | c.blue() << 16
 
 
+def gold(t: str) -> str:
+    """Rich text for an alert: a key, a command or a name, in the alerts' gold."""
+    return f'<span style="color:{ALERT_GOLD}">{html.escape(t)}</span>'
+
+
 def alert_title_bar(w: QWidget) -> None:
     """An alert's title bar: no icon (or system menu), WTNCA_NODRAWICON | WTNCA_NOSYSMENU, and ALERT_TITLE /
     ALERT_TITLE_TEXT as its colours (Windows 11; Windows 10 keeps its own)."""
@@ -3792,6 +4358,7 @@ def main():
     ap.add_argument("--standby", action="store_true", help="stay hidden until Resolve runs")
     ap.add_argument("--after", type=int, help=argparse.SUPPRESS)  # pid of a Resolve that is shutting down
     ap.add_argument("--hotkeys", type=int, help=argparse.SUPPRESS)  # run the hotkey process for this app pid
+    ap.add_argument("--restarted", action="store_true", help=argparse.SUPPRESS)  # after an update: wait for the old one
     args = ap.parse_args()
     if args.hotkeys is not None:
         return hotkey_process(args.hotkeys)
@@ -3810,6 +4377,12 @@ def main():
     name = f"{AUTOSTART_NAME}-{os.environ.get('USERNAME') or os.environ.get('USER') or 'user'}" + ("-demo" if args.demo else "")
     sock = QLocalSocket()
     sock.connectToServer(name)
+    for _ in range(40 if args.restarted else 0):  # after an update: the old copy is still closing, wait for it
+        if not sock.waitForConnected(300):
+            break
+        sock.abort()
+        time.sleep(0.25)
+        sock.connectToServer(name)
     if sock.waitForConnected(300):  # already running: bring that window forward instead of opening another
         sock.write(b"show")
         sock.waitForBytesWritten(300)
