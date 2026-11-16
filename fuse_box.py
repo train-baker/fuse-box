@@ -444,6 +444,7 @@ class ResolveBridge:
         self.resolve = None
         self.error = ""
         self._dvr = None
+        self.no_still: set[str] = set()  # clips whose node states can't be read by grabbing a still
 
     def connect(self) -> bool:
         if self.demo:
@@ -578,15 +579,29 @@ class ResolveBridge:
         xml = self._still_grade(proj, tl)
         return drx_graph_states(xml) if xml else None
 
-    @staticmethod
-    def _still_grade(proj, tl) -> str | None:
-        """The current clip's grade as .drx text: a still is grabbed, exported and deleted again."""
+    def _still_grade(self, proj, tl) -> str | None:
+        """The current clip's grade as .drx text: a still is grabbed, exported and deleted again.
+        Never on a compound clip (Resolve hangs for a minute grabbing one), nor again on a clip where a grab
+        failed or was slow this session."""
         try:
+            item = tl.GetCurrentVideoItem() if tl else None
+            uid = _safe(item.GetUniqueId) if item else None
+            if not item or uid in self.no_still:
+                return None
+            mpi = _safe(item.GetMediaPoolItem)
+            if mpi and _safe(mpi.GetClipProperty, "Type") == "Compound":
+                self.no_still.add(uid)
+                return None
             album = proj.GetGallery().GetCurrentStillAlbum()
-            still = tl.GrabStill() if tl and album else None
-            if not still and tl and album:  # Resolve refuses a grab within ~0.5 s of the last one
+            if not album:
+                return None
+            t = time.monotonic()
+            still = tl.GrabStill()
+            if not still and time.monotonic() - t < 1:  # refused at once: within ~0.5 s of the last grab
                 time.sleep(0.5)
                 still = tl.GrabStill()
+            if not still or time.monotonic() - t > 3:  # failed or slow: not on this clip again
+                self.no_still.add(uid)
             if not still:
                 return None
             tmp = tempfile.mkdtemp(prefix="fusebox_")
@@ -606,6 +621,22 @@ class ResolveBridge:
         for t in range(1, int(tl.GetTrackCount("video") or 0) + 1):
             items += _as_list(tl.GetItemListInTrack("video", t))
         return items
+
+    def clip_number(self, tl, item) -> int | None:
+        """The clip's number as the Color page shows it over its thumbnail: the gradable video clips (a generator such
+        as Solid Color has no node graph and gets no number) in timeline order, by start, the higher track first."""
+        if not tl or not item:
+            return None
+        try:
+            want = item.GetUniqueId()
+            order = [(it.GetStart() or 0, -t, it.GetUniqueId())
+                     for t in range(1, int(tl.GetTrackCount("video") or 0) + 1)
+                     for it in _as_list(tl.GetItemListInTrack("video", t))
+                     if it.GetUniqueId() == want or _safe(it.GetNodeGraph, 1) is not None]
+        except Exception:
+            return None
+        order.sort(key=lambda o: o[:2])
+        return next((n for n, o in enumerate(order, 1) if o[2] == want), None)
 
 
 # ----------------------------------------------------------------------------- Resolve's own shortcuts
@@ -2570,6 +2601,8 @@ STYLE = f"""
 QFrame#grid * {{ font-size: 12px; }}  /* the grid reads a step bigger than the window around it */
 QMainWindow, QWidget#root {{ background: {BG}; }}
 QLabel#muted {{ color: {TEXT_DIM}; }}
+QLabel#connsep {{ color: {TEXT_DIM}; font-size: 26px; }}  /* the dot after Resolve's version, a little bigger */
+QLabel#connbar {{ color: {TEXT_FAINT}; }}  /* between the clip's number and its name, darker */
 QLabel#flash {{ color: {ACTION_GOLD}; }}
 QCheckBox#allclips {{ color: {ACTION_GOLD}; }}
 QLabel#flash[idle="true"] {{ color: {TEXT_FAINT}; }}
@@ -2833,6 +2866,13 @@ class MainWindow(QMainWindow):
         f = QHBoxLayout()
         f.setSpacing(6)
         self.conn_dot = StateDot(7)
+        # "DR 21.1.2.10 · 89 | clip name": version, a dot, the clip's number on the Color page, a darker bar, its name
+        self.conn_ver = QLabel("", objectName="muted")
+        self.conn_sep = QLabel("·", objectName="connsep")
+        self.conn_sep.setFixedHeight(16)  # a big dot, but the footer's line height stays as it was
+        self.conn_sep.setAlignment(Qt.AlignCenter)
+        self.conn_num = QLabel("", objectName="muted")
+        self.conn_bar = QLabel("|", objectName="connbar")
         self.conn_label = TailLabel("Connecting…", objectName="muted")  # takes the room left; the clip name ends it
         # "DR 21 · clip [+] (group)": the + box (every other clip too) sits right after the clip name
         self.all_clips_box = IconButton("plus", "…and every other enabled clip in the timeline", 12, 12,
@@ -2842,6 +2882,9 @@ class MainWindow(QMainWindow):
         self.conn_rest = QLabel("", objectName="muted")
         self._has_clip = False
         f.addWidget(self.conn_dot)
+        for w in (self.conn_ver, self.conn_sep, self.conn_num, self.conn_bar):
+            w.hide()
+            f.addWidget(w)
         f.addWidget(self.conn_label)
         f.addWidget(self.all_clips_box)
         f.addWidget(self.conn_rest)
@@ -3341,22 +3384,24 @@ class MainWindow(QMainWindow):
         HOLD labels (and keep_state) only get checked for existence — they stay grey until ON / OFF is picked."""
         if not tags or self._busy or self.bridge.resolve is None:
             return
-        try:
-            proj, tl, _ = self.bridge.context()
-            states = self.bridge.node_states(proj, tl) if proj and tl else None
-        except Exception:
-            states = None
-        if states is None:
-            self.flash("Couldn't read node states from Resolve (open the Color page with a clip)")
-            return
-        missing = []
-        for tag in tags:
-            hits = [on for label, on in states if label and label.lower() == tag["name"].lower()]
-            if hits:
-                if not keep_state and tag["on"] is not None:
+        # whether a label is on this clip is known from its node tree; only ON / OFF labels need the real states
+        # (a still grab, slow on some clips)
+        here = {str(n[1] or "").lower() for nodes in self._nodes.values() for n in nodes or []}
+        missing = [t["name"] for t in tags if t["name"].lower() not in here]
+        sync = [] if keep_state else [t for t in tags if t["on"] is not None and t["name"] not in missing]
+        if sync:
+            try:
+                proj, tl, _ = self.bridge.context()
+                states = self.bridge.node_states(proj, tl) if proj and tl else None
+            except Exception:
+                states = None
+            if states is None:
+                self.flash("Couldn't read node states on this clip (compound clips can't be read)")
+                return
+            for tag in sync:
+                hits = [on for label, on in states if label and label.lower() == tag["name"].lower()]
+                if hits:
                     tag["on"] = any(hits)
-            else:
-                missing.append(tag["name"])
         if missing:
             self.flash(f"No node labelled {', '.join(f'“{m}”' for m in missing)} on this clip")
         elif not quiet_found:
@@ -3807,6 +3852,15 @@ class MainWindow(QMainWindow):
         self.hotkeys.set_focus_only(on)
         self.save()
 
+    def _show_conn(self, version: str, num: int | None, name: str):
+        """Footer: "DR 21.1.2.10 · 89 | clip name" (the version and number only when known)."""
+        self.conn_ver.setText(version or "")
+        self.conn_num.setText(str(num) if num else "")
+        for w, on in ((self.conn_ver, bool(version)), (self.conn_sep, bool(version)),
+                      (self.conn_num, bool(num)), (self.conn_bar, bool(num))):
+            w.setVisible(on)
+        self.conn_label.setText(name)
+
     # ---------------------------------------------------------------- Resolve sync
     def try_connect(self) -> bool:
         ok = self.bridge.connect()
@@ -3821,7 +3875,7 @@ class MainWindow(QMainWindow):
         self.bridge.resolve = None
         self._sig = None
         self.conn_dot.set_state(False)
-        self.conn_label.setText("Not connected")
+        self._show_conn("", None, "Not connected")
         self.conn_label.setToolTip(why)
         self.conn_rest.setText("")
         self._has_clip = False
@@ -3956,20 +4010,20 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             layers = 0
         layers = layers or clip_layers or 1
-        parts = [v] if (v := self.bridge.version()) else []
+        rest, num = "", None
         if not proj:
-            parts.append("no project open")
+            name = "no project open"
         elif not tl:
-            parts.append("no timeline open")
-        rest = ""
-        if item:
+            name = "no timeline open"
+        elif item:
             gname = _safe(grp.GetName) if grp else None
-            parts.append(item.GetName())  # last, so a shortened line still ends with the clip name's end
+            name = item.GetName()  # last, so a shortened line still ends with the clip name's end
             rest = f"({gname})" if gname else ""
-        elif tl:
-            parts.append("no clip under playhead")
+            num = self.bridge.clip_number(tl, item)
+        else:
+            name = "no clip under playhead"
         self._has_clip = bool(item)
-        self.conn_label.setText("  ·  ".join(parts))
+        self._show_conn(self.bridge.version(), num, name)
         self.conn_rest.setText(rest)
         self._sync_all_clips_box()
         self.conn_label.setToolTip(f"{pname or ''}  /  {tname or ''}")

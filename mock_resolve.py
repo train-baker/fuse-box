@@ -64,6 +64,9 @@ class _Item:
     def GetUniqueId(self):
         return self.uid
 
+    def GetStart(self):  # one after another, in the order they were made
+        return int(self.uid) * 100
+
     def GetNodeGraph(self, layer=1):
         return self.layers[layer - 1] if 1 <= layer <= len(self.layers) else None
 
