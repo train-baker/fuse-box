@@ -95,7 +95,7 @@ from PySide6.QtWidgets import (
 )
 
 APP_NAME = "Fuse Box"
-APP_VERSION = "0.3.3 r21"
+APP_VERSION = "0.3.4 r21"
 NUM_TOGGLES = 4
 NUM_PRESETS = 3
 MAX_LAYERS = 16
